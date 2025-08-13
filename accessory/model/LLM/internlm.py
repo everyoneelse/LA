@@ -185,11 +185,11 @@ class FeedForward(nn.Module):
         self.w1 = ColumnParallelLinear(
             dim, hidden_dim, bias=bias, gather_output=False
         )
-        self.w2 = RowParallelLinear(
-            dim, hidden_dim, bias=bias, input_is_parallel=True
-        )
         self.w3 = ColumnParallelLinear(
-            hidden_dim, out_dim, bias=bias, gather_output=False
+            dim, hidden_dim, bias=bias, gather_output=False
+        )
+        self.w2 = RowParallelLinear(
+            hidden_dim, out_dim, bias=bias, input_is_parallel=True
         )
 
     # @torch.compile
@@ -197,7 +197,7 @@ class FeedForward(nn.Module):
         return F.silu(x) * y
 
     def forward(self, x):
-        return self.w3(self._silu_gating(self.w1(x), self.w2(x)))
+        return self.w2(self._silu_gating(self.w1(x), self.w3(x)))
 
 
 class PackedFlashBaseLayer1D(nn.Module):
