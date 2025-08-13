@@ -9,6 +9,9 @@ import tqdm
 from multiprocessing import Pool
 from accessory.model.tokenizer import Tokenizer
 import pickle
+import multiprocessing as mp
+from tqdm import tqdm as tqdm_bar
+from tqdm import set_lock as tqdm_set_lock
 
 
 def pack_tokens(filename, save_dir, tokenizer):
@@ -19,6 +22,15 @@ def pack_tokens(filename, save_dir, tokenizer):
     l_packed_tokens = []
     _idx = 0
     _cache = [0 for _ in range(max_len)]
+
+    # determine a stable progress-bar position per worker process
+    try:
+        worker_name = mp.current_process().name  # e.g., 'ForkPoolWorker-1'
+        worker_idx = int(worker_name.split('-')[-1]) - 1
+    except Exception:
+        worker_idx = 0
+
+    pbar = tqdm_bar(total=len(texts), desc=os.path.basename(filename), position=worker_idx, leave=False)
 
     for t in texts:
         token_split = tokenizer.encode(t, bos=True, eos=True)
@@ -39,8 +51,11 @@ def pack_tokens(filename, save_dir, tokenizer):
         _cache[_idx:_idx + remaining_len] = token_split
         _idx += remaining_len
         assert _cache[_idx - 1] == 2
+        pbar.update(1)
 
     l_packed_tokens.append(_cache)
+
+    pbar.close()
 
     save_tokens_path = os.path.join(save_dir, os.path.basename(filename).split('.')[0] + '.pkl')
     with open(save_tokens_path, 'wb') as f:
@@ -59,6 +74,9 @@ files.sort()
 save_dir = "packed_tokens"
 os.makedirs(save_dir, exist_ok=True)
 
+
+# set tqdm lock for multi-process progress bars
+tqdm_set_lock(mp.RLock())
 
 pool = Pool(48)
 
