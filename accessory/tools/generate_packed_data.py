@@ -11,7 +11,6 @@ from accessory.model.tokenizer import Tokenizer
 import pickle
 import multiprocessing as mp
 from tqdm import tqdm as tqdm_bar
-from tqdm import set_lock as tqdm_set_lock
 
 
 def pack_tokens(filename, save_dir, tokenizer):
@@ -76,7 +75,7 @@ os.makedirs(save_dir, exist_ok=True)
 
 
 # set tqdm lock for multi-process progress bars
-tqdm_set_lock(mp.RLock())
+tqdm.set_lock(mp.RLock())
 
 pool = Pool(48)
 
