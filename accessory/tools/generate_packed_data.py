@@ -74,8 +74,11 @@ save_dir = "packed_tokens"
 os.makedirs(save_dir, exist_ok=True)
 
 
-# set tqdm lock for multi-process progress bars
-tqdm.set_lock(mp.RLock())
+# set tqdm lock for multi-process progress bars (if available)
+try:
+    tqdm.set_lock(mp.RLock())
+except AttributeError:
+    pass
 
 pool = Pool(48)
 
