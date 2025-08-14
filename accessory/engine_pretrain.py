@@ -7,6 +7,7 @@ import torch
 
 import accessory.util.misc as misc
 import accessory.util.lr_sched as lr_sched
+from accessory.util.flop_counter import FLOPCounter, TokenCounter, get_model_config_from_model
 
 from fairscale.nn.model_parallel import initialize as fs_init
 
@@ -28,6 +29,14 @@ def train_one_epoch(model: torch.nn.Module,
 
     dataset_state = {}
 
+    # Initialize FLOP counter and token counter
+    model_config = get_model_config_from_model(model)
+    flop_counter = FLOPCounter(model_config)
+    token_counter = TokenCounter()
+    
+    # Track cumulative FLOPs
+    total_flops = 0
+
     if log_writer is not None:
         print('log_dir: {}'.format(log_writer.log_dir))
     for data_iter_step, (examples, labels, item_states) in enumerate(
@@ -36,6 +45,16 @@ def train_one_epoch(model: torch.nn.Module,
 
         if data_iter_step % accum_iter == 0:
             lr_sched.adjust_learning_rate(optimizer, data_iter_step, args)
+
+        # Update token counter
+        batch_size, seq_len = examples.shape
+        # Create padding mask (non-zero tokens are valid)
+        padding_mask = (examples != 0)
+        token_counter.update(batch_size, seq_len, padding_mask)
+        
+        # Calculate FLOPs for this batch
+        batch_flops = flop_counter.calculate_total_flops(batch_size, seq_len)
+        total_flops += batch_flops
 
         autocast_ctx = {
             "bf16": torch.cuda.amp.autocast(dtype=torch.bfloat16),
@@ -109,6 +128,39 @@ def train_one_epoch(model: torch.nn.Module,
             metric_value = misc.all_reduce_mean(metric_value, group=fs_init.get_data_parallel_group())
             if log_writer is not None:
                 log_writer.add_scalar(metric_name, metric_value, data_iter_step)
+        
+        # Print token and FLOP statistics every print_freq iterations
+        if (data_iter_step + 1) % print_freq == 0:
+            total_tokens = token_counter.get_total_tokens()
+            batch_tokens = token_counter.get_batch_tokens()
+            
+            # Aggregate across all processes
+            if fs_init.get_data_parallel_world_size() > 1:
+                total_tokens_tensor = torch.tensor(total_tokens, dtype=torch.long, device='cuda')
+                batch_tokens_tensor = torch.tensor(batch_tokens, dtype=torch.long, device='cuda')
+                total_flops_tensor = torch.tensor(total_flops, dtype=torch.long, device='cuda')
+                
+                torch.distributed.all_reduce(total_tokens_tensor, group=fs_init.get_data_parallel_group())
+                torch.distributed.all_reduce(batch_tokens_tensor, group=fs_init.get_data_parallel_group())
+                torch.distributed.all_reduce(total_flops_tensor, group=fs_init.get_data_parallel_group())
+                
+                total_tokens = total_tokens_tensor.item()
+                batch_tokens = batch_tokens_tensor.item()
+                total_flops = total_flops_tensor.item()
+            
+            if misc.is_main_process():
+                print(f"[Iter {data_iter_step + 1}] "
+                      f"Tokens: {TokenCounter.format_tokens(batch_tokens)} (batch), "
+                      f"{TokenCounter.format_tokens(total_tokens)} (total) | "
+                      f"FLOPs: {FLOPCounter.format_flops(batch_flops)} (batch), "
+                      f"{FLOPCounter.format_flops(total_flops)} (total)")
+                
+                # Log to tensorboard if available
+                if log_writer is not None:
+                    log_writer.add_scalar('tokens/batch', batch_tokens, data_iter_step)
+                    log_writer.add_scalar('tokens/total', total_tokens, data_iter_step)
+                    log_writer.add_scalar('flops/batch', batch_flops, data_iter_step)
+                    log_writer.add_scalar('flops/total', total_flops, data_iter_step)
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
