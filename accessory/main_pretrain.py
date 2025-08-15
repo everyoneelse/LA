@@ -119,6 +119,16 @@ def get_args_parser():
     parser.add_argument('--checkpointing', action="store_true", default=False,
                         help="enable gradient checkopointing")
 
+    # Validation controls
+    parser.add_argument('--val_freq', type=int, default=10000,
+                        help='number of iterations between validations')
+    parser.add_argument('--async_val', action='store_true', default=False,
+                        help='run validation in a background thread without blocking training (rank 0 only)')
+    parser.add_argument('--val_max_batches', type=int, default=None,
+                        help='if set, limit number of validation batches per run')
+    parser.add_argument('--val_device', type=str, default=None,
+                        help='device for background validation (e.g., cuda:1). If None, use current device')
+
     return parser
 
 
