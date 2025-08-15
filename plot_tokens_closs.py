@@ -86,15 +86,21 @@ def build_series(
             "Ensure your log contains both '[Iter <n>]' and 'Epoch: [... <n>/...] closs: ...' lines for the same steps."
         )
 
-    xs_tokens: List[float] = []
-    ys_closs: List[float] = []
-
+    # Build token-loss pairs to ensure proper sorting
+    token_loss_pairs = []
     for step in common_steps:
-        xs_tokens.append(step_to_total_tokens[step])
+        tokens = step_to_total_tokens[step]
         if metric == "avg":
-            ys_closs.append(step_to_closs_avg[step])
+            loss = step_to_closs_avg[step]
         else:
-            ys_closs.append(step_to_closs_current[step])
+            loss = step_to_closs_current[step]
+        token_loss_pairs.append((tokens, loss))
+
+    # Sort by tokens to ensure proper ordering
+    token_loss_pairs.sort(key=lambda x: x[0])
+    
+    xs_tokens = [pair[0] for pair in token_loss_pairs]
+    ys_closs = [pair[1] for pair in token_loss_pairs]
 
     return xs_tokens, ys_closs
 
