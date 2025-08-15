@@ -19,3 +19,5 @@ httpx[socks]
 einops
 regex
 h5py
+
+matplotlib>=3.7.0
