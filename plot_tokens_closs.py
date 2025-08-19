@@ -3,9 +3,19 @@
 import argparse
 import re
 import sys
+from bisect import bisect_right
 from typing import Dict, List, Tuple
 
-import matplotlib.pyplot as plt
+def _get_plt():
+    try:
+        import matplotlib.pyplot as plt  # type: ignore
+        return plt
+    except Exception as exc:
+        print(
+            "Matplotlib is required for plotting. Please install dependencies (e.g., pip install -r requirements.txt).",
+            file=sys.stderr,
+        )
+        return None
 
 
 ITER_LINE_REGEX = re.compile(
@@ -77,13 +87,13 @@ def parse_log(filepath: str) -> Tuple[Dict[int, float], Dict[int, float], Dict[i
     return step_to_total_tokens, step_to_closs_current, step_to_closs_avg
 
 
-def parse_validation_losses(filepath: str) -> List[float]:
-    """Parse validation closs values after the '!!!start validation!!!' marker.
+def parse_validation_losses(filepath: str) -> List[Tuple[int, float]]:
+    """Parse validation entries after the '!!!start validation!!!' marker.
 
-    Returns a list of current closs values in the order they appear.
+    Returns a list of tuples (step, closs_current) in the order they appear.
     """
     in_validation: bool = False
-    val_closs_values: List[float] = []
+    val_entries: List[Tuple[int, float]] = []
 
     with open(filepath, "r", encoding="utf-8", errors="ignore") as handle:
         for line in handle:
@@ -102,10 +112,11 @@ def parse_validation_losses(filepath: str) -> List[float]:
 
             val_match = VAL_EPOCH_LINE_REGEX.search(line)
             if val_match:
+                step = int(val_match.group("step"))
                 closs_current = float(val_match.group("closs"))
-                val_closs_values.append(closs_current)
+                val_entries.append((step, closs_current))
 
-    return val_closs_values
+    return val_entries
 
 
 def build_series(
@@ -150,6 +161,9 @@ def plot_log_log(
     out_path: str | None = None,
     show: bool = False,
 ) -> None:
+    plt = _get_plt()
+    if plt is None:
+        return
     plt.figure(figsize=(7.5, 5.0))
     plt.plot(tokens, closs, marker="o", markersize=3, linewidth=1.25, label=metric_label)
     plt.xscale("log")
@@ -180,6 +194,10 @@ def plot_validation(
         print("No validation closs entries found to plot.")
         return
 
+    plt = _get_plt()
+    if plt is None:
+        return
+
     indices = list(range(1, len(val_losses) + 1))
     avg_loss = sum(val_losses) / float(len(val_losses))
 
@@ -187,6 +205,79 @@ def plot_validation(
     plt.plot(indices, val_losses, marker="o", markersize=2.5, linewidth=1.0, label="val closs")
     plt.axhline(avg_loss, color="red", linestyle="--", linewidth=1.25, label=f"mean={avg_loss:.4f}")
     plt.xlabel("validation step (batch index)")
+    plt.ylabel("closs")
+    if title:
+        plt.title(title)
+    plt.grid(True, which="both", linestyle=":", alpha=0.5)
+    plt.legend()
+    plt.tight_layout()
+
+    if out_path:
+        plt.savefig(out_path, dpi=200)
+        print(f"Saved validation figure to: {out_path}")
+
+    if show or not out_path:
+        plt.show()
+
+
+def align_validation_tokens(
+    val_steps_and_losses: List[Tuple[int, float]],
+    step_to_total_tokens: Dict[int, float],
+) -> Tuple[List[float], List[float]]:
+    """Map each validation (step, loss) to the most recent prior training step's tokens.
+
+    If no prior step exists for a validation step, that validation point is skipped.
+    Returns two aligned lists: tokens_xs, losses_ys.
+    """
+    if not val_steps_and_losses:
+        return [], []
+
+    if not step_to_total_tokens:
+        return [], []
+
+    training_steps_sorted = sorted(step_to_total_tokens.keys())
+    tokens_xs: List[float] = []
+    losses_ys: List[float] = []
+
+    for val_step, val_loss in val_steps_and_losses:
+        # find rightmost training step <= val_step
+        insert_pos = bisect_right(training_steps_sorted, val_step)
+        idx = insert_pos - 1
+        if idx < 0:
+            # no prior training step with tokens; skip this validation point
+            continue
+        matched_step = training_steps_sorted[idx]
+        tokens_x = step_to_total_tokens[matched_step]
+        tokens_xs.append(tokens_x)
+        losses_ys.append(val_loss)
+
+    # Keep validation points ordered by tokens for a monotonic x curve
+    paired = sorted(zip(tokens_xs, losses_ys), key=lambda p: p[0])
+    if not paired:
+        return [], []
+    xs, ys = zip(*paired)
+    return list(xs), list(ys)
+
+
+def plot_validation_tokens(
+    tokens: List[float],
+    val_losses: List[float],
+    title: str | None = None,
+    out_path: str | None = None,
+    show: bool = False,
+) -> None:
+    if not tokens or not val_losses:
+        print("No validation entries found to plot vs tokens.")
+        return
+
+    plt = _get_plt()
+    if plt is None:
+        return
+
+    plt.figure(figsize=(7.5, 5.0))
+    plt.plot(tokens, val_losses, marker="o", markersize=2.5, linewidth=1.0, label="val closs")
+    plt.xscale("log")
+    plt.xlabel("Total tokens processed")
     plt.ylabel("closs")
     if title:
         plt.title(title)
@@ -228,7 +319,8 @@ def main() -> None:
         action="store_true",
         help=(
             "If set, also parse validation closs (after '!!!start validation!!!') and plot "
-            "validation loss vs batch index with a horizontal mean line."
+            "validation closs vs tokens by aligning each validation step to the most recent "
+            "training iteration's token count."
         ),
     )
     parser.add_argument(
@@ -272,14 +364,17 @@ def main() -> None:
         plot_log_log(xs_tokens, ys_closs, metric_label, title=plot_title, out_path=args.out, show=args.show)
 
     if args.plot_val:
-        val_losses = parse_validation_losses(args.log_path)
-        if val_losses:
-            avg_loss = sum(val_losses) / float(len(val_losses))
-            print(f"Validation closs count: {len(val_losses)} | mean: {avg_loss:.6f}")
-            val_title = (args.title + " - validation") if args.title else "Validation closs"
-            plot_validation(val_losses, title=val_title, out_path=args.val_out, show=args.show)
+        val_entries = parse_validation_losses(args.log_path)
+        tokens_for_val, losses_for_val = align_validation_tokens(val_entries, step_to_total_tokens)
+        if losses_for_val:
+            avg_loss = sum(losses_for_val) / float(len(losses_for_val))
+            print(
+                f"Validation closs count (aligned): {len(losses_for_val)} | mean: {avg_loss:.6f}"
+            )
+            val_title = (args.title + " - validation") if args.title else "Validation closs vs tokens"
+            plot_validation_tokens(tokens_for_val, losses_for_val, title=val_title, out_path=args.val_out, show=args.show)
         else:
-            print("No validation losses found in the log.")
+            print("No validation losses found in the log (or unable to align with training tokens).")
 
 
 if __name__ == "__main__":
