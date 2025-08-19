@@ -19,6 +19,12 @@ EPOCH_LINE_REGEX = re.compile(
     r"closs:\s*(?P<closs>[\d.eE+-]+)\s*\((?P<closs_avg>[\d.eE+-]+)\)"
 )
 
+# Validation lines do not contain 'lr: ...'
+VAL_EPOCH_LINE_REGEX = re.compile(
+    r"Epoch:\s*\[\d+\]\s*\[(?P<step>\d+)/[^\]]*\]\s*"
+    r"closs:\s*(?P<closs>[\d.eE+-]+)\s*\((?P<closs_avg>[\d.eE+-]+)\)"
+)
+
 SUFFIX_MULTIPLIERS = {
     None: 1.0,
     "K": 1e3,
@@ -69,6 +75,37 @@ def parse_log(filepath: str) -> Tuple[Dict[int, float], Dict[int, float], Dict[i
                 continue
 
     return step_to_total_tokens, step_to_closs_current, step_to_closs_avg
+
+
+def parse_validation_losses(filepath: str) -> List[float]:
+    """Parse validation closs values after the '!!!start validation!!!' marker.
+
+    Returns a list of current closs values in the order they appear.
+    """
+    in_validation: bool = False
+    val_closs_values: List[float] = []
+
+    with open(filepath, "r", encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
+            if "!!!start validation!!!" in line:
+                in_validation = True
+                continue
+
+            if not in_validation:
+                continue
+
+            # Heuristic stop: after validation finishes, many logs print 'Averaged stats:' or new sections
+            if line.strip().startswith("Averaged stats:"):
+                # keep going in case there are multiple validation sections; do not turn off yet
+                # We'll rely on absence of VAL_EPOCH_LINE_REGEX to naturally skip other lines
+                pass
+
+            val_match = VAL_EPOCH_LINE_REGEX.search(line)
+            if val_match:
+                closs_current = float(val_match.group("closs"))
+                val_closs_values.append(closs_current)
+
+    return val_closs_values
 
 
 def build_series(
@@ -133,6 +170,38 @@ def plot_log_log(
         plt.show()
 
 
+def plot_validation(
+    val_losses: List[float],
+    title: str | None = None,
+    out_path: str | None = None,
+    show: bool = False,
+) -> None:
+    if not val_losses:
+        print("No validation closs entries found to plot.")
+        return
+
+    indices = list(range(1, len(val_losses) + 1))
+    avg_loss = sum(val_losses) / float(len(val_losses))
+
+    plt.figure(figsize=(7.5, 5.0))
+    plt.plot(indices, val_losses, marker="o", markersize=2.5, linewidth=1.0, label="val closs")
+    plt.axhline(avg_loss, color="red", linestyle="--", linewidth=1.25, label=f"mean={avg_loss:.4f}")
+    plt.xlabel("validation step (batch index)")
+    plt.ylabel("closs")
+    if title:
+        plt.title(title)
+    plt.grid(True, which="both", linestyle=":", alpha=0.5)
+    plt.legend()
+    plt.tight_layout()
+
+    if out_path:
+        plt.savefig(out_path, dpi=200)
+        print(f"Saved validation figure to: {out_path}")
+
+    if show or not out_path:
+        plt.show()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
@@ -155,9 +224,22 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--plot-val",
+        action="store_true",
+        help=(
+            "If set, also parse validation closs (after '!!!start validation!!!') and plot "
+            "validation loss vs batch index with a horizontal mean line."
+        ),
+    )
+    parser.add_argument(
         "--out",
         default=None,
         help="Optional output image file path (e.g., /workspace/tokens_vs_closs.png)",
+    )
+    parser.add_argument(
+        "--val-out",
+        default=None,
+        help="Optional output image path for validation plot (e.g., /workspace/val_closs.png)",
     )
     parser.add_argument(
         "--title",
@@ -181,12 +263,23 @@ def main() -> None:
             metric=args.metric,
         )
     except Exception as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(1)
+        print(f"Error building training series: {exc}", file=sys.stderr)
+        xs_tokens, ys_closs = [], []
 
-    plot_title = args.title or f"Tokens vs closs ({args.metric})"
-    metric_label = f"closs ({args.metric})"
-    plot_log_log(xs_tokens, ys_closs, metric_label, title=plot_title, out_path=args.out, show=args.show)
+    if xs_tokens and ys_closs:
+        plot_title = args.title or f"Tokens vs closs ({args.metric})"
+        metric_label = f"closs ({args.metric})"
+        plot_log_log(xs_tokens, ys_closs, metric_label, title=plot_title, out_path=args.out, show=args.show)
+
+    if args.plot_val:
+        val_losses = parse_validation_losses(args.log_path)
+        if val_losses:
+            avg_loss = sum(val_losses) / float(len(val_losses))
+            print(f"Validation closs count: {len(val_losses)} | mean: {avg_loss:.6f}")
+            val_title = (args.title + " - validation") if args.title else "Validation closs"
+            plot_validation(val_losses, title=val_title, out_path=args.val_out, show=args.show)
+        else:
+            print("No validation losses found in the log.")
 
 
 if __name__ == "__main__":
