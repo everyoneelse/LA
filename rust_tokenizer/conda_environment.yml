@@ -1,0 +1,45 @@
+name: rust-tokenizer
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  # Python
+  - python=3.10
+  
+  # Rust 工具链
+  - rust=1.75  # 或更新版本
+  - cargo
+  - pkg-config
+  
+  # 构建工具
+  - maturin>=1.4
+  - gcc_linux-64  # Linux
+  # - clang_osx-64  # macOS
+  # - m2w64-gcc  # Windows
+  
+  # Python 包
+  - pip
+  - numpy
+  - pytest
+  - pytest-benchmark
+  
+  # 开发工具（可选）
+  - jupyterlab
+  - ipython
+  
+  # pip 依赖
+  - pip:
+    # 核心依赖
+    - tokenizers>=0.15
+    - transformers>=4.30
+    - sentencepiece>=0.1.99
+    
+    # 开发工具
+    - black
+    - isort
+    - mypy
+    - ruff
+    
+    # 性能分析（可选）
+    - memory_profiler
+    - line_profiler
