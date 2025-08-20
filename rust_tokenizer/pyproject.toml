@@ -1,0 +1,18 @@
+[build-system]
+requires = ["maturin>=1,<2"]
+build-backend = "maturin"
+
+[project]
+name = "rust_tokenizer"
+version = "0.1.0"
+description = "Rust tokenizer with PyO3 bindings"
+requires-python = ">=3.8"
+readme = "README.md"
+classifiers = [
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: 3",
+]
+
+[tool.maturin]
+bindings = "pyo3"
+module-name = "rust_tokenizer"
