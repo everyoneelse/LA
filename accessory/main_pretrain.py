@@ -132,6 +132,27 @@ def get_args_parser():
     return parser
 
 
+def _format_params_with_units(n):
+    k = n / 1e3
+    m = n / 1e6
+    b = n / 1e9
+    return f"{k:.2f}K | {m:.2f}M | {b:.2f}B"
+
+
+def _count_global_params(model):
+    mp_world_size = fs_init.get_model_parallel_world_size()
+    total = 0
+    trainable = 0
+    for p in model.parameters():
+        multiplier = mp_world_size if getattr(p, "is_model_parallel", False) else 1
+        numel_global = p.numel() * multiplier
+        total += numel_global
+        if p.requires_grad:
+            trainable += numel_global
+    frozen = total - trainable
+    return total, trainable, frozen
+
+
 def main(args):
     misc.init_distributed_mode(args)
     fs_init.initialize_model_parallel(args.model_parallel_size)
@@ -166,6 +187,13 @@ def main(args):
                           args.tokenizer_path, with_visual=False,
                           max_seq_len=args.max_words)
     promote_trainable_params_to_fp32(model)
+    # Print model parameter sizes (global) before training
+    if dp_rank == 0 and mp_rank == 0:
+        _total, _trainable, _frozen = _count_global_params(model)
+        print("Model Parameters (Global):")
+        print(f"  Total:     {_total:,} params | {_format_params_with_units(_total)}")
+        print(f"  Trainable: {_trainable:,} params | {_format_params_with_units(_trainable)}")
+        print(f"  Frozen:    {_frozen:,} params | {_format_params_with_units(_frozen)}")
     misc.print_param_status(model)
     if args.pretrained_path and fs_init.get_data_parallel_rank() == 0:
         print(f"load pretrained from {args.pretrained_path}")
