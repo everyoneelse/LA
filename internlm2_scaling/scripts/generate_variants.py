@@ -50,12 +50,13 @@ BASE_CONFIG = {
 HEAD_DIM = 128
 
 # Allowed head counts (even only to keep kv=heads/2 integral)
-ALLOWED_NUM_HEADS = [4, 6, 8, 12, 16]
-# Allowed layers to search over
-ALLOWED_LAYERS = [8, 12, 16, 20, 24]
+ALLOWED_NUM_HEADS = [2, 4, 6, 8, 12, 16]
+# Allowed layers to search over (include shallower nets for sub-100M)
+ALLOWED_LAYERS = [4, 6, 8, 12, 16, 20, 24, 28]
 
 # Targets (billions of params). Must be >= embedding floor.
-TARGETS_B = [0.10, 0.20, 0.35, 0.60, 1.00, 1.50]
+# Start lower to approximate 10^7–10^8 scale under this vocab/tying setting.
+TARGETS_B = [0.05, 0.075, 0.10, 0.15, 0.20, 0.30, 0.45, 0.60, 0.80, 1.00, 1.30, 1.50]
 
 
 def round_up_multiple(x: int, multiple: int) -> int:
