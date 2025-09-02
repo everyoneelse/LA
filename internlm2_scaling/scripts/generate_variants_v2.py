@@ -141,12 +141,15 @@ with open(SUMMARY_CSV, "w", newline="", encoding="utf-8") as csvfile:
         "layers",
         "ffn_size",
         "params",
+        "params_wo_embed",
     ]
     writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
     writer.writeheader()
     for idx, v in enumerate(VARIANTS, 1):
         cfg_name = f"internlm2-chat-{v['label']}-h{v['heads']}-L{v['layers']}.json"
         params_est = estimate_params(v["hidden_size"], v["heads"], v["layers"], v["ffn_size"])
+        embed = 92544 * v["hidden_size"]
+        params_no_embed = params_est - embed
         writer.writerow(
             {
                 "index": idx,
@@ -157,6 +160,7 @@ with open(SUMMARY_CSV, "w", newline="", encoding="utf-8") as csvfile:
                 "layers": v["layers"],
                 "ffn_size": v["ffn_size"],
                 "params": f"{params_est/1e6:.2f}M",
+                "params_wo_embed": f"{params_no_embed/1e6:.2f}M",
             }
         )
 
