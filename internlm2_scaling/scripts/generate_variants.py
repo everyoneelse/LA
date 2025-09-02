@@ -50,12 +50,25 @@ BASE_CONFIG = {
 HEAD_DIM = 128
 
 # Allowed head counts (even only to keep kv=heads/2 integral)
-ALLOWED_NUM_HEADS = [4, 6, 8, 12, 16]
+ALLOWED_NUM_HEADS = [2, 4, 6, 8, 12, 16, 20, 24, 32]
 # Allowed layers to search over
-ALLOWED_LAYERS = [8, 12, 16, 20, 24]
+ALLOWED_LAYERS = [6, 8, 12, 16, 20, 24, 32, 36]
 
-# Targets (billions of params). Must be >= embedding floor.
-TARGETS_B = [0.10, 0.20, 0.35, 0.60, 1.00, 1.50]
+# Targets following OpenAI scaling law (from 10^3 to 10^9 params)
+# Based on GPT-3 style configurations and scaling law paper
+TARGETS_B = [
+    0.001,   # 1M - 10^6
+    0.003,   # 3M - 10^6.5  
+    0.010,   # 10M - 10^7
+    0.030,   # 30M - 10^7.5
+    0.100,   # 100M - 10^8
+    0.125,   # 125M (GPT-3 small)
+    0.350,   # 350M (GPT-3 medium)
+    0.760,   # 760M (GPT-3 large)  
+    1.300,   # 1.3B (GPT-3 XL)
+    2.700,   # 2.7B
+    6.700,   # 6.7B
+]
 
 
 def round_up_multiple(x: int, multiple: int) -> int:
@@ -111,64 +124,130 @@ def estimate_params(
     return int(total)
 
 
+def get_openai_style_config(target_params: int) -> Tuple[int, int, int]:
+    """
+    Get OpenAI/GPT-3 style configuration for given parameter count.
+    Returns (d_model, n_layers, n_heads) following scaling law principles.
+    
+    Based on GPT-3 configurations:
+    - 125M: d_model=768, n_layers=12
+    - 350M: d_model=1024, n_layers=24  
+    - 760M: d_model=1536, n_layers=24
+    - 1.3B: d_model=2048, n_layers=24
+    - 2.7B: d_model=2560, n_layers=32
+    - 6.7B: d_model=4096, n_layers=32
+    """
+    if target_params <= 3e6:  # 3M
+        return 256, 6, 2
+    elif target_params <= 10e6:  # 10M
+        return 384, 8, 4
+    elif target_params <= 30e6:  # 30M
+        return 512, 12, 4
+    elif target_params <= 125e6:  # 125M
+        return 768, 12, 6
+    elif target_params <= 350e6:  # 350M
+        return 1024, 24, 8
+    elif target_params <= 760e6:  # 760M
+        return 1536, 24, 12
+    elif target_params <= 1.3e9:  # 1.3B
+        return 2048, 24, 16
+    elif target_params <= 2.7e9:  # 2.7B
+        return 2560, 32, 20
+    else:  # 6.7B+
+        return 4096, 32, 32
+
+
 def pick_variants(base: Dict) -> List[Variant]:
     vocab_size = int(base["vocab_size"])
     tie_word_embeddings = bool(base.get("tie_word_embeddings", True))
 
     variants: List[Variant] = []
 
-    # Precompute all feasible shapes within our grid
-    candidate_shapes: List[Tuple[int, int, int, int]] = []  # (hidden, heads, kv_heads, layers)
-    for heads in ALLOWED_NUM_HEADS:
-        hidden = heads * HEAD_DIM
-        kv_heads = max(1, heads // 2)
-        for layers in ALLOWED_LAYERS:
-            candidate_shapes.append((hidden, heads, kv_heads, layers))
-
-    # For each target param count, pick best matching shape by choosing intermediate_size ~ 4x
+    # For each target param count, use OpenAI-style configuration as starting point
     for target_b in TARGETS_B:
         target_params = int(target_b * 1e9)
-        best: Tuple[float, Variant] = (float("inf"), None)  # (abs diff, variant)
-        for hidden, heads, kv_heads, layers in candidate_shapes:
-            intermediate = round_up_multiple(4 * hidden, 256)
-            params = estimate_params(
-                hidden_size=hidden,
-                num_heads=heads,
-                num_kv_heads=kv_heads,
-                num_layers=layers,
-                intermediate_size=intermediate,
-                vocab_size=vocab_size,
-                tie_word_embeddings=tie_word_embeddings,
-            )
-            diff = abs(params - target_params)
-            variant = Variant(
-                name=f"hs{hidden}_h{heads}_kv{kv_heads}_L{layers}",
-                hidden_size=hidden,
-                num_heads=heads,
-                num_kv_heads=kv_heads,
-                num_layers=layers,
-                intermediate_size=intermediate,
-                param_count=params,
-                tokens_recommended=int(20 * params),
-            )
-            # Ensure variant is strictly smaller than the 1.8B base (safety)
-            if params >= int(1.8e9):
-                continue
-            # Ensure we don't pick ones below the embedding floor more than 15% off the target
-            # (helps avoid selecting trivially too-small configs for large targets)
-            rel_err = diff / max(target_params, 1)
-            # Keep the best by absolute diff primarily
-            if diff < best[0]:
-                best = (diff, variant)
-        if best[1] is not None:
-            variants.append(best[1])
+        
+        # Get OpenAI-style base configuration
+        base_d_model, base_n_layers, base_n_heads = get_openai_style_config(target_params)
+        
+        # Ensure heads is compatible with HEAD_DIM=128 and kv_heads
+        if base_d_model % HEAD_DIM != 0:
+            base_n_heads = base_d_model // HEAD_DIM
+        else:
+            base_n_heads = base_d_model // HEAD_DIM
+            
+        # Ensure n_heads is in allowed list
+        if base_n_heads not in ALLOWED_NUM_HEADS:
+            # Find closest allowed heads
+            base_n_heads = min(ALLOWED_NUM_HEADS, key=lambda x: abs(x - base_n_heads))
+            base_d_model = base_n_heads * HEAD_DIM
+            
+        # Ensure n_layers is in allowed list
+        if base_n_layers not in ALLOWED_LAYERS:
+            base_n_layers = min(ALLOWED_LAYERS, key=lambda x: abs(x - base_n_layers))
+        
+        kv_heads = max(1, base_n_heads // 2)
+        intermediate = round_up_multiple(4 * base_d_model, 256)
+        
+        # Calculate actual params with this configuration
+        params = estimate_params(
+            hidden_size=base_d_model,
+            num_heads=base_n_heads,
+            num_kv_heads=kv_heads,
+            num_layers=base_n_layers,
+            intermediate_size=intermediate,
+            vocab_size=vocab_size,
+            tie_word_embeddings=tie_word_embeddings,
+        )
+        
+        # If too far from target, try to adjust
+        if abs(params - target_params) / target_params > 0.3:
+            # Try different layer counts to get closer
+            best_diff = abs(params - target_params)
+            best_config = (base_d_model, base_n_heads, kv_heads, base_n_layers, intermediate)
+            
+            for adj_layers in ALLOWED_LAYERS:
+                adj_params = estimate_params(
+                    hidden_size=base_d_model,
+                    num_heads=base_n_heads,
+                    num_kv_heads=kv_heads,
+                    num_layers=adj_layers,
+                    intermediate_size=intermediate,
+                    vocab_size=vocab_size,
+                    tie_word_embeddings=tie_word_embeddings,
+                )
+                diff = abs(adj_params - target_params)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_config = (base_d_model, base_n_heads, kv_heads, adj_layers, intermediate)
+                    params = adj_params
+            
+            base_d_model, base_n_heads, kv_heads, base_n_layers, intermediate = best_config
 
-    # Deduplicate by (hidden, layers) to avoid near-duplicates; keep increasing sizes
+        variant = Variant(
+            name=f"hs{base_d_model}_h{base_n_heads}_kv{kv_heads}_L{base_n_layers}",
+            hidden_size=base_d_model,
+            num_heads=base_n_heads,
+            num_kv_heads=kv_heads,
+            num_layers=base_n_layers,
+            intermediate_size=intermediate,
+            param_count=params,
+            tokens_recommended=int(20 * params),
+        )
+        
+        # Skip if too large
+        if params >= int(7e9):
+            continue
+            
+        variants.append(variant)
+
+    # Remove duplicates and sort
     unique: Dict[Tuple[int, int], Variant] = {}
     for v in sorted(variants, key=lambda x: x.param_count):
         key = (v.hidden_size, v.num_layers)
-        if key not in unique:
+        if key not in unique or unique[key].param_count > v.param_count:
             unique[key] = v
+    
     variants = list(unique.values())
     variants.sort(key=lambda x: x.param_count)
 
