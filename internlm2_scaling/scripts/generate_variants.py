@@ -50,13 +50,21 @@ BASE_CONFIG = {
 HEAD_DIM = 128
 
 # Allowed head counts (even only to keep kv=heads/2 integral)
-ALLOWED_NUM_HEADS = [2, 4, 6, 8, 12, 16]
+ALLOWED_NUM_HEADS = [1, 2, 4, 6, 8, 12, 16]
 # Allowed layers to search over (include shallower nets for sub-100M)
-ALLOWED_LAYERS = [4, 6, 8, 12, 16, 20, 24, 28]
+ALLOWED_LAYERS = [1, 2, 3, 4, 6, 8, 12, 16, 20, 24, 28]
 
 # Targets (billions of params). Must be >= embedding floor.
 # Start lower to approximate 10^7–10^8 scale under this vocab/tying setting.
 TARGETS_B = [0.05, 0.075, 0.10, 0.15, 0.20, 0.30, 0.45, 0.60, 0.80, 1.00, 1.30, 1.50]
+
+# Additional ultra-small variants around 10^6 params require reducing vocab and tying
+MICRO_BASE_CONFIG = dict(BASE_CONFIG)
+MICRO_BASE_CONFIG.update({
+    "vocab_size": 4096,
+    "tie_word_embeddings": True,
+})
+MICRO_TARGETS_B = [0.0004, 0.0007, 0.0010]  # 0.4M, 0.7M, 1.0M
 
 
 def round_up_multiple(x: int, multiple: int) -> int:
@@ -112,7 +120,7 @@ def estimate_params(
     return int(total)
 
 
-def pick_variants(base: Dict) -> List[Variant]:
+def pick_variants(base: Dict, targets_b: List[float] = None) -> List[Variant]:
     vocab_size = int(base["vocab_size"])
     tie_word_embeddings = bool(base.get("tie_word_embeddings", True))
 
@@ -127,7 +135,9 @@ def pick_variants(base: Dict) -> List[Variant]:
             candidate_shapes.append((hidden, heads, kv_heads, layers))
 
     # For each target param count, pick best matching shape by choosing intermediate_size ~ 4x
-    for target_b in TARGETS_B:
+    if targets_b is None:
+        targets_b = TARGETS_B
+    for target_b in targets_b:
         target_params = int(target_b * 1e9)
         best: Tuple[float, Variant] = (float("inf"), None)  # (abs diff, variant)
         for hidden, heads, kv_heads, layers in candidate_shapes:
@@ -187,6 +197,15 @@ def make_config(base: Dict, variant: Variant) -> Dict:
     return cfg
 
 
+def format_params_for_fname(param_count: int) -> str:
+    if param_count < 1_000_000:
+        approx_k = int(round(param_count / 1e3))
+        return f"{approx_k}K"
+    else:
+        approx_m = int(round(param_count / 1e6))
+        return f"{approx_m}M"
+
+
 def human_count(n: int) -> str:
     if n >= 1_000_000_000:
         return f"{n/1e9:.2f}B"
@@ -202,13 +221,15 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     variants = pick_variants(BASE_CONFIG)
+    micro_variants = pick_variants(MICRO_BASE_CONFIG, targets_b=MICRO_TARGETS_B)
 
     rows: List[List[str]] = []
-    for i, v in enumerate(variants, 1):
-        cfg = make_config(BASE_CONFIG, v)
-        # File name: internlm2-chat-{approx_params}params-h{heads}-L{layers}.json
-        approx_params_m = int(round(v.param_count / 1e6))
-        fname = f"internlm2-chat-{approx_params_m}M-h{v.num_heads}-L{v.num_layers}.json"
+    all_variants: List[Tuple[str, Variant]] = [("base", v) for v in variants] + [("micro", v) for v in micro_variants]
+    for i, (group, v) in enumerate(all_variants, 1):
+        cfg = make_config(BASE_CONFIG if group == "base" else MICRO_BASE_CONFIG, v)
+        # File name uses M for >=1M, K for <1M
+        approx_token = format_params_for_fname(v.param_count)
+        fname = f"internlm2-chat-{approx_token}-h{v.num_heads}-L{v.num_layers}.json"
         path = os.path.join(out_dir, fname)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
@@ -239,9 +260,9 @@ def main():
             "params_raw",
             "tokens_recommended",
         ])
-        for i, v in enumerate(variants, 1):
-            approx_params_m = int(round(v.param_count / 1e6))
-            fname = f"internlm2-chat-{approx_params_m}M-h{v.num_heads}-L{v.num_layers}.json"
+        for i, (group, v) in enumerate(all_variants, 1):
+            approx_token = format_params_for_fname(v.param_count)
+            fname = f"internlm2-chat-{approx_token}-h{v.num_heads}-L{v.num_layers}.json"
             writer.writerow([
                 i,
                 fname,
