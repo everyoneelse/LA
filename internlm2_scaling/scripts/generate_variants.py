@@ -50,24 +50,42 @@ BASE_CONFIG = {
 HEAD_DIM = 128
 
 # Allowed head counts (even only to keep kv=heads/2 integral)
-ALLOWED_NUM_HEADS = [2, 4, 6, 8, 12, 16, 20, 24, 32]
-# Allowed layers to search over
-ALLOWED_LAYERS = [6, 8, 12, 16, 20, 24, 32, 36]
+ALLOWED_NUM_HEADS = [1, 2, 3, 4, 6, 8, 12, 16, 20, 24, 32]
+# Allowed layers to search over  
+ALLOWED_LAYERS = [2, 3, 4, 6, 8, 12, 16, 20, 24, 32, 36]
 
 # Targets following OpenAI scaling law (from 10^3 to 10^9 params)
-# Based on GPT-3 style configurations and scaling law paper
+# Extended to include more micro models for comprehensive scaling law study
 TARGETS_B = [
-    0.001,   # 1M - 10^6
-    0.003,   # 3M - 10^6.5  
-    0.010,   # 10M - 10^7
-    0.030,   # 30M - 10^7.5
-    0.100,   # 100M - 10^8
-    0.125,   # 125M (GPT-3 small)
-    0.350,   # 350M (GPT-3 medium)
-    0.760,   # 760M (GPT-3 large)  
-    1.300,   # 1.3B (GPT-3 XL)
-    2.700,   # 2.7B
-    6.700,   # 6.7B
+    # Micro models (10^3 to 10^6)
+    0.0001,   # 100K - 10^5
+    0.0003,   # 300K - 10^5.5
+    0.0005,   # 500K - 10^5.7
+    0.001,    # 1M - 10^6
+    0.002,    # 2M - 10^6.3
+    0.003,    # 3M - 10^6.5
+    0.005,    # 5M - 10^6.7
+    0.007,    # 7M - 10^6.85
+    # Small models (10^6 to 10^8)
+    0.010,    # 10M - 10^7
+    0.020,    # 20M - 10^7.3
+    0.030,    # 30M - 10^7.5
+    0.050,    # 50M - 10^7.7
+    0.070,    # 70M - 10^7.85
+    0.100,    # 100M - 10^8
+    0.125,    # 125M (GPT-3 small)
+    # Medium models (10^8 to 10^9)
+    0.200,    # 200M
+    0.350,    # 350M (GPT-3 medium)
+    0.500,    # 500M
+    0.760,    # 760M (GPT-3 large)  
+    1.000,    # 1B
+    1.300,    # 1.3B (GPT-3 XL)
+    # Large models (10^9+)
+    2.000,    # 2B
+    2.700,    # 2.7B
+    4.000,    # 4B
+    6.700,    # 6.7B
 ]
 
 
@@ -95,6 +113,7 @@ def estimate_params(
     intermediate_size: int,
     vocab_size: int,
     tie_word_embeddings: bool,
+    head_dim: int = HEAD_DIM,
 ) -> int:
     # Embedding and LM head
     embed_params = vocab_size * hidden_size
@@ -104,7 +123,7 @@ def estimate_params(
         lm_head_params = hidden_size * vocab_size
 
     # Attention per layer
-    kv_hidden = num_kv_heads * HEAD_DIM
+    kv_hidden = num_kv_heads * head_dim
     attn_params_per_layer = (
         hidden_size * hidden_size  # Wq
         + hidden_size * kv_hidden  # Wk
@@ -129,30 +148,57 @@ def get_openai_style_config(target_params: int) -> Tuple[int, int, int]:
     Get OpenAI/GPT-3 style configuration for given parameter count.
     Returns (d_model, n_layers, n_heads) following scaling law principles.
     
-    Based on GPT-3 configurations:
-    - 125M: d_model=768, n_layers=12
-    - 350M: d_model=1024, n_layers=24  
-    - 760M: d_model=1536, n_layers=24
-    - 1.3B: d_model=2048, n_layers=24
-    - 2.7B: d_model=2560, n_layers=32
-    - 6.7B: d_model=4096, n_layers=32
+    Extended to cover micro models (10^3 to 10^6) and larger models.
+    Based on GPT-3 configurations and scaling law principles.
     """
-    if target_params <= 3e6:  # 3M
+    if target_params <= 100e3:  # 100K
+        return 128, 2, 1
+    elif target_params <= 300e3:  # 300K
+        return 128, 3, 1
+    elif target_params <= 500e3:  # 500K
+        return 128, 4, 1
+    elif target_params <= 1e6:  # 1M
+        return 192, 3, 1  # Slightly larger d_model
+    elif target_params <= 2e6:  # 2M
+        return 192, 4, 1
+    elif target_params <= 3e6:  # 3M
+        return 256, 3, 2
+    elif target_params <= 5e6:  # 5M
+        return 256, 4, 2
+    elif target_params <= 7e6:  # 7M
         return 256, 6, 2
     elif target_params <= 10e6:  # 10M
-        return 384, 8, 4
+        return 384, 4, 3
+    elif target_params <= 20e6:  # 20M
+        return 384, 6, 3
     elif target_params <= 30e6:  # 30M
-        return 512, 12, 4
-    elif target_params <= 125e6:  # 125M
+        return 512, 6, 4
+    elif target_params <= 50e6:  # 50M
+        return 512, 8, 4
+    elif target_params <= 70e6:  # 70M
+        return 640, 8, 5  # Non-standard but works
+    elif target_params <= 100e6:  # 100M
+        return 768, 8, 6
+    elif target_params <= 125e6:  # 125M (GPT-3 small)
         return 768, 12, 6
-    elif target_params <= 350e6:  # 350M
-        return 1024, 24, 8
-    elif target_params <= 760e6:  # 760M
-        return 1536, 24, 12
-    elif target_params <= 1.3e9:  # 1.3B
-        return 2048, 24, 16
+    elif target_params <= 200e6:  # 200M
+        return 896, 12, 7
+    elif target_params <= 350e6:  # 350M (GPT-3 medium)
+        return 1024, 16, 8
+    elif target_params <= 500e6:  # 500M
+        return 1280, 16, 10
+    elif target_params <= 760e6:  # 760M (GPT-3 large)
+        return 1536, 20, 12
+    elif target_params <= 1e9:  # 1B
+        return 1664, 20, 13
+    elif target_params <= 1.3e9:  # 1.3B (GPT-3 XL)
+        return 2048, 20, 16
+    elif target_params <= 2e9:  # 2B
+        return 2304, 24, 18
     elif target_params <= 2.7e9:  # 2.7B
-        return 2560, 32, 20
+        return 2560, 28, 20
+    elif target_params <= 4e9:  # 4B
+        return 3200, 28, 25
     else:  # 6.7B+
         return 4096, 32, 32
 
@@ -167,37 +213,81 @@ def pick_variants(base: Dict) -> List[Variant]:
     for target_b in TARGETS_B:
         target_params = int(target_b * 1e9)
         
+        # For micro models, use progressively smaller vocab to reduce param count
+        if target_params < 100e3:  # < 100K
+            micro_vocab_size = 1000
+            micro_tie_embeddings = True
+        elif target_params < 300e3:  # < 300K
+            micro_vocab_size = 2000
+            micro_tie_embeddings = True
+        elif target_params < 500e3:  # < 500K
+            micro_vocab_size = 4000
+            micro_tie_embeddings = True
+        elif target_params < 1e6:  # < 1M
+            micro_vocab_size = 8000
+            micro_tie_embeddings = True
+        elif target_params < 2e6:  # < 2M
+            micro_vocab_size = 16000
+            micro_tie_embeddings = True
+        elif target_params < 5e6:  # < 5M
+            micro_vocab_size = 32000
+            micro_tie_embeddings = True
+        elif target_params < 10e6:  # < 10M
+            micro_vocab_size = 32000
+            micro_tie_embeddings = tie_word_embeddings
+        else:
+            micro_vocab_size = vocab_size
+            micro_tie_embeddings = tie_word_embeddings
+        
         # Get OpenAI-style base configuration
         base_d_model, base_n_layers, base_n_heads = get_openai_style_config(target_params)
         
-        # Ensure heads is compatible with HEAD_DIM=128 and kv_heads
-        if base_d_model % HEAD_DIM != 0:
-            base_n_heads = base_d_model // HEAD_DIM
+        # For very small models, we may need smaller head_dim
+        if base_d_model < HEAD_DIM:
+            # For micro models, use head_dim = d_model for single head
+            actual_head_dim = base_d_model
+            base_n_heads = 1
         else:
-            base_n_heads = base_d_model // HEAD_DIM
-            
-        # Ensure n_heads is in allowed list
-        if base_n_heads not in ALLOWED_NUM_HEADS:
-            # Find closest allowed heads
-            base_n_heads = min(ALLOWED_NUM_HEADS, key=lambda x: abs(x - base_n_heads))
-            base_d_model = base_n_heads * HEAD_DIM
+            # Ensure heads is compatible with HEAD_DIM=128 and kv_heads
+            actual_head_dim = HEAD_DIM
+            if base_d_model % HEAD_DIM != 0:
+                base_n_heads = base_d_model // HEAD_DIM
+            else:
+                base_n_heads = base_d_model // HEAD_DIM
+                
+            # Ensure n_heads is in allowed list
+            if base_n_heads not in ALLOWED_NUM_HEADS:
+                # Find closest allowed heads
+                base_n_heads = min(ALLOWED_NUM_HEADS, key=lambda x: abs(x - base_n_heads))
+                base_d_model = base_n_heads * HEAD_DIM
             
         # Ensure n_layers is in allowed list
         if base_n_layers not in ALLOWED_LAYERS:
             base_n_layers = min(ALLOWED_LAYERS, key=lambda x: abs(x - base_n_layers))
         
         kv_heads = max(1, base_n_heads // 2)
-        intermediate = round_up_multiple(4 * base_d_model, 256)
+        
+        # For micro models, use smaller MLP ratios to avoid parameter explosion
+        if target_params < 1e6:  # < 1M params
+            mlp_ratio = 2  # 2x instead of 4x
+            intermediate = round_up_multiple(mlp_ratio * base_d_model, 64)
+        elif target_params < 10e6:  # < 10M params
+            mlp_ratio = 3  # 3x instead of 4x
+            intermediate = round_up_multiple(mlp_ratio * base_d_model, 128)
+        else:
+            intermediate = round_up_multiple(4 * base_d_model, 256)
         
         # Calculate actual params with this configuration
+        actual_head_dim = base_d_model if base_d_model < HEAD_DIM else HEAD_DIM
         params = estimate_params(
             hidden_size=base_d_model,
             num_heads=base_n_heads,
             num_kv_heads=kv_heads,
             num_layers=base_n_layers,
             intermediate_size=intermediate,
-            vocab_size=vocab_size,
-            tie_word_embeddings=tie_word_embeddings,
+            vocab_size=micro_vocab_size,
+            tie_word_embeddings=micro_tie_embeddings,
+            head_dim=actual_head_dim,
         )
         
         # If too far from target, try to adjust
@@ -213,8 +303,9 @@ def pick_variants(base: Dict) -> List[Variant]:
                     num_kv_heads=kv_heads,
                     num_layers=adj_layers,
                     intermediate_size=intermediate,
-                    vocab_size=vocab_size,
-                    tie_word_embeddings=tie_word_embeddings,
+                    vocab_size=micro_vocab_size,
+                    tie_word_embeddings=micro_tie_embeddings,
+                    head_dim=actual_head_dim,
                 )
                 diff = abs(adj_params - target_params)
                 if diff < best_diff:
@@ -224,6 +315,7 @@ def pick_variants(base: Dict) -> List[Variant]:
             
             base_d_model, base_n_heads, kv_heads, base_n_layers, intermediate = best_config
 
+        # Store the vocab info for config generation
         variant = Variant(
             name=f"hs{base_d_model}_h{base_n_heads}_kv{kv_heads}_L{base_n_layers}",
             hidden_size=base_d_model,
@@ -234,6 +326,9 @@ def pick_variants(base: Dict) -> List[Variant]:
             param_count=params,
             tokens_recommended=int(20 * params),
         )
+        # Add custom attributes for micro models
+        variant.vocab_size = micro_vocab_size
+        variant.tie_word_embeddings = micro_tie_embeddings
         
         # Skip if too large
         if params >= int(7e9):
@@ -261,7 +356,13 @@ def make_config(base: Dict, variant: Variant) -> Dict:
     cfg["num_key_value_heads"] = variant.num_kv_heads
     cfg["num_hidden_layers"] = variant.num_layers
     cfg["intermediate_size"] = variant.intermediate_size
-    # Keep other fields the same
+    
+    # Use micro model settings if available
+    if hasattr(variant, 'vocab_size'):
+        cfg["vocab_size"] = variant.vocab_size
+    if hasattr(variant, 'tie_word_embeddings'):
+        cfg["tie_word_embeddings"] = variant.tie_word_embeddings
+    
     return cfg
 
 
