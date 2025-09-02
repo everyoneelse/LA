@@ -102,6 +102,7 @@ class Variant:
     num_layers: int
     intermediate_size: int
     param_count: int  # total params
+    non_embed_params: int  # non-embedding params (for scaling law)
     tokens_recommended: int  # Chinchilla T ~ 20 * N
 
 
@@ -114,6 +115,7 @@ def estimate_params(
     vocab_size: int,
     tie_word_embeddings: bool,
     head_dim: int = HEAD_DIM,
+    exclude_embeddings: bool = False,
 ) -> int:
     # Embedding and LM head
     embed_params = vocab_size * hidden_size
@@ -138,9 +140,37 @@ def estimate_params(
     norms_per_layer = 2 * hidden_size
 
     layer_params = attn_params_per_layer + mlp_params_per_layer + norms_per_layer
+    
+    # Non-embedding parameters (for scaling law)
+    non_embed_params = num_layers * layer_params
+    
+    if exclude_embeddings:
+        return int(non_embed_params)
+    else:
+        total = embed_params + lm_head_params + non_embed_params
+        return int(total)
 
-    total = embed_params + lm_head_params + num_layers * layer_params
-    return int(total)
+
+def estimate_non_embedding_params(
+    hidden_size: int,
+    num_heads: int,
+    num_kv_heads: int,
+    num_layers: int,
+    intermediate_size: int,
+    head_dim: int = HEAD_DIM,
+) -> int:
+    """Calculate only non-embedding parameters for scaling law analysis."""
+    return estimate_params(
+        hidden_size=hidden_size,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        num_layers=num_layers,
+        intermediate_size=intermediate_size,
+        vocab_size=0,  # Not used when exclude_embeddings=True
+        tie_word_embeddings=True,  # Not used when exclude_embeddings=True
+        head_dim=head_dim,
+        exclude_embeddings=True,
+    )
 
 
 def get_openai_style_config(target_params: int) -> Tuple[int, int, int]:
@@ -210,37 +240,27 @@ def pick_variants(base: Dict) -> List[Variant]:
     variants: List[Variant] = []
 
     # For each target param count, use OpenAI-style configuration as starting point
+    # NOTE: Now targeting NON-EMBEDDING parameters for scaling law analysis
     for target_b in TARGETS_B:
-        target_params = int(target_b * 1e9)
+        target_non_embed_params = int(target_b * 1e9)  # Target non-embedding params
         
-        # For micro models, use progressively smaller vocab to reduce param count
-        if target_params < 100e3:  # < 100K
-            micro_vocab_size = 1000
-            micro_tie_embeddings = True
-        elif target_params < 300e3:  # < 300K
-            micro_vocab_size = 2000
-            micro_tie_embeddings = True
-        elif target_params < 500e3:  # < 500K
-            micro_vocab_size = 4000
-            micro_tie_embeddings = True
-        elif target_params < 1e6:  # < 1M
+        # Get OpenAI-style base configuration based on non-embedding param target
+        base_d_model, base_n_layers, base_n_heads = get_openai_style_config(target_non_embed_params)
+        
+        # For vocab_size, use reasonable defaults that don't dominate parameter count
+        # but are still practical for training
+        if target_non_embed_params < 1e6:  # < 1M non-embed params
             micro_vocab_size = 8000
             micro_tie_embeddings = True
-        elif target_params < 2e6:  # < 2M
+        elif target_non_embed_params < 10e6:  # < 10M non-embed params
             micro_vocab_size = 16000
             micro_tie_embeddings = True
-        elif target_params < 5e6:  # < 5M
+        elif target_non_embed_params < 50e6:  # < 50M non-embed params
             micro_vocab_size = 32000
-            micro_tie_embeddings = True
-        elif target_params < 10e6:  # < 10M
-            micro_vocab_size = 32000
-            micro_tie_embeddings = tie_word_embeddings
+            micro_tie_embeddings = False
         else:
             micro_vocab_size = vocab_size
             micro_tie_embeddings = tie_word_embeddings
-        
-        # Get OpenAI-style base configuration
-        base_d_model, base_n_layers, base_n_heads = get_openai_style_config(target_params)
         
         # For very small models, we may need smaller head_dim
         if base_d_model < HEAD_DIM:
@@ -268,10 +288,10 @@ def pick_variants(base: Dict) -> List[Variant]:
         kv_heads = max(1, base_n_heads // 2)
         
         # For micro models, use smaller MLP ratios to avoid parameter explosion
-        if target_params < 1e6:  # < 1M params
+        if target_non_embed_params < 1e6:  # < 1M non-embed params
             mlp_ratio = 2  # 2x instead of 4x
             intermediate = round_up_multiple(mlp_ratio * base_d_model, 64)
-        elif target_params < 10e6:  # < 10M params
+        elif target_non_embed_params < 10e6:  # < 10M non-embed params
             mlp_ratio = 3  # 3x instead of 4x
             intermediate = round_up_multiple(mlp_ratio * base_d_model, 128)
         else:
@@ -279,7 +299,9 @@ def pick_variants(base: Dict) -> List[Variant]:
         
         # Calculate actual params with this configuration
         actual_head_dim = base_d_model if base_d_model < HEAD_DIM else HEAD_DIM
-        params = estimate_params(
+        
+        # Calculate both total and non-embedding params
+        total_params = estimate_params(
             hidden_size=base_d_model,
             num_heads=base_n_heads,
             num_kv_heads=kv_heads,
@@ -290,14 +312,25 @@ def pick_variants(base: Dict) -> List[Variant]:
             head_dim=actual_head_dim,
         )
         
-        # If too far from target, try to adjust
-        if abs(params - target_params) / target_params > 0.3:
+        non_embed_params = estimate_non_embedding_params(
+            hidden_size=base_d_model,
+            num_heads=base_n_heads,
+            num_kv_heads=kv_heads,
+            num_layers=base_n_layers,
+            intermediate_size=intermediate,
+            head_dim=actual_head_dim,
+        )
+        
+        # If too far from target NON-EMBEDDING params, try to adjust
+        if abs(non_embed_params - target_non_embed_params) / target_non_embed_params > 0.3:
             # Try different layer counts to get closer
-            best_diff = abs(params - target_params)
+            best_diff = abs(non_embed_params - target_non_embed_params)
             best_config = (base_d_model, base_n_heads, kv_heads, base_n_layers, intermediate)
+            best_total_params = total_params
+            best_non_embed_params = non_embed_params
             
             for adj_layers in ALLOWED_LAYERS:
-                adj_params = estimate_params(
+                adj_total_params = estimate_params(
                     hidden_size=base_d_model,
                     num_heads=base_n_heads,
                     num_kv_heads=kv_heads,
@@ -307,13 +340,24 @@ def pick_variants(base: Dict) -> List[Variant]:
                     tie_word_embeddings=micro_tie_embeddings,
                     head_dim=actual_head_dim,
                 )
-                diff = abs(adj_params - target_params)
+                adj_non_embed_params = estimate_non_embedding_params(
+                    hidden_size=base_d_model,
+                    num_heads=base_n_heads,
+                    num_kv_heads=kv_heads,
+                    num_layers=adj_layers,
+                    intermediate_size=intermediate,
+                    head_dim=actual_head_dim,
+                )
+                diff = abs(adj_non_embed_params - target_non_embed_params)
                 if diff < best_diff:
                     best_diff = diff
                     best_config = (base_d_model, base_n_heads, kv_heads, adj_layers, intermediate)
-                    params = adj_params
+                    best_total_params = adj_total_params
+                    best_non_embed_params = adj_non_embed_params
             
             base_d_model, base_n_heads, kv_heads, base_n_layers, intermediate = best_config
+            total_params = best_total_params
+            non_embed_params = best_non_embed_params
 
         # Store the vocab info for config generation
         variant = Variant(
@@ -323,28 +367,29 @@ def pick_variants(base: Dict) -> List[Variant]:
             num_kv_heads=kv_heads,
             num_layers=base_n_layers,
             intermediate_size=intermediate,
-            param_count=params,
-            tokens_recommended=int(20 * params),
+            param_count=total_params,
+            non_embed_params=non_embed_params,
+            tokens_recommended=int(20 * non_embed_params),  # Base on non-embed params
         )
         # Add custom attributes for micro models
         variant.vocab_size = micro_vocab_size
         variant.tie_word_embeddings = micro_tie_embeddings
         
-        # Skip if too large
-        if params >= int(7e9):
+        # Skip if too large (based on non-embedding params)
+        if non_embed_params >= int(7e9):
             continue
             
         variants.append(variant)
 
-    # Remove duplicates and sort
+    # Remove duplicates and sort by non-embedding params
     unique: Dict[Tuple[int, int], Variant] = {}
-    for v in sorted(variants, key=lambda x: x.param_count):
+    for v in sorted(variants, key=lambda x: x.non_embed_params):
         key = (v.hidden_size, v.num_layers)
-        if key not in unique or unique[key].param_count > v.param_count:
+        if key not in unique or unique[key].non_embed_params > v.non_embed_params:
             unique[key] = v
     
     variants = list(unique.values())
-    variants.sort(key=lambda x: x.param_count)
+    variants.sort(key=lambda x: x.non_embed_params)
 
     return variants
 
@@ -385,9 +430,18 @@ def main():
     rows: List[List[str]] = []
     for i, v in enumerate(variants, 1):
         cfg = make_config(BASE_CONFIG, v)
-        # File name: internlm2-chat-{approx_params}params-h{heads}-L{layers}.json
-        approx_params_m = int(round(v.param_count / 1e6))
-        fname = f"internlm2-chat-{approx_params_m}M-h{v.num_heads}-L{v.num_layers}.json"
+        # File name based on non-embedding params for scaling law clarity
+        approx_non_embed_params = v.non_embed_params
+        if approx_non_embed_params >= 1e9:
+            approx_str = f"{approx_non_embed_params/1e9:.1f}B"
+            fname = f"internlm2-chat-{approx_str}-h{v.num_heads}-L{v.num_layers}.json"
+        elif approx_non_embed_params >= 1e6:
+            approx_str = f"{int(round(approx_non_embed_params / 1e6))}M"
+            fname = f"internlm2-chat-{approx_str}-h{v.num_heads}-L{v.num_layers}.json"
+        else:
+            approx_str = f"{int(round(approx_non_embed_params / 1e3))}K"
+            fname = f"internlm2-chat-{approx_str}-h{v.num_heads}-L{v.num_layers}.json"
+            
         path = os.path.join(out_dir, fname)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
@@ -398,7 +452,8 @@ def main():
             f"{v.num_heads}/{v.num_kv_heads}",
             str(v.num_layers),
             str(v.intermediate_size),
-            human_count(v.param_count),
+            human_count(v.non_embed_params),  # Show non-embedding params
+            human_count(v.param_count),       # Show total params
             human_count(v.tokens_recommended),
         ])
 
@@ -414,13 +469,27 @@ def main():
             "kv_heads",
             "layers",
             "ffn_size",
-            "params",
-            "params_raw",
+            "non_embed_params",
+            "non_embed_params_raw",
+            "total_params",
+            "total_params_raw",
+            "vocab_size",
+            "tied_embeddings",
             "tokens_recommended",
         ])
         for i, v in enumerate(variants, 1):
-            approx_params_m = int(round(v.param_count / 1e6))
-            fname = f"internlm2-chat-{approx_params_m}M-h{v.num_heads}-L{v.num_layers}.json"
+            # Generate filename based on non-embedding params
+            approx_non_embed_params = v.non_embed_params
+            if approx_non_embed_params >= 1e9:
+                approx_str = f"{approx_non_embed_params/1e9:.1f}B"
+                fname = f"internlm2-chat-{approx_str}-h{v.num_heads}-L{v.num_layers}.json"
+            elif approx_non_embed_params >= 1e6:
+                approx_str = f"{int(round(approx_non_embed_params / 1e6))}M"
+                fname = f"internlm2-chat-{approx_str}-h{v.num_heads}-L{v.num_layers}.json"
+            else:
+                approx_str = f"{int(round(approx_non_embed_params / 1e3))}K"
+                fname = f"internlm2-chat-{approx_str}-h{v.num_heads}-L{v.num_layers}.json"
+                
             writer.writerow([
                 i,
                 fname,
@@ -429,8 +498,12 @@ def main():
                 v.num_kv_heads,
                 v.num_layers,
                 v.intermediate_size,
+                human_count(v.non_embed_params),
+                v.non_embed_params,
                 human_count(v.param_count),
                 v.param_count,
+                v.vocab_size,
+                v.tie_word_embeddings,
                 v.tokens_recommended,
             ])
 
@@ -442,7 +515,8 @@ def main():
         "heads(kv)",
         "layers",
         "ffn_size",
-        "params",
+        "non_embed_params",
+        "total_params",
         "tokens(~20xN)",
     ]
 
