@@ -166,7 +166,7 @@ def main(args):
                           args.tokenizer_path, with_visual=False,
                           max_seq_len=args.max_words)
     promote_trainable_params_to_fp32(model)
-    misc.print_param_status(model)
+    misc.print_param_status(model, exclude_embedding=True)
     if args.pretrained_path and fs_init.get_data_parallel_rank() == 0:
         print(f"load pretrained from {args.pretrained_path}")
         load_result = load_tensor_parallel_model_list(model, args.pretrained_path)
