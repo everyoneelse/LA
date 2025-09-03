@@ -1,0 +1,27 @@
+{
+  "model_name": "Simple Transformer",
+  "total_params": 6709520,
+  "batch_size": 8,
+  "seq_size": 512,
+  "num_samples_per_epoch": 10000,
+  "batches_per_epoch": 1250,
+  "total_tokens_per_epoch": 5120000,
+  "forward_flops_per_batch": 33877393408,
+  "backward_flops_per_batch": 67754786816.0,
+  "total_flops_per_batch": 101632180224.0,
+  "epoch_forward_flops": 42346741760000,
+  "epoch_backward_flops": 84693483520000.0,
+  "epoch_total_flops": 127040225280000.0,
+  "flops_per_token": 24812544.0,
+  "backward_factor": 2.0,
+  "formulas": {
+    "variables": "B = batch_size, L = seq_size, N = num_samples_per_epoch, E = num_epochs",
+    "forward_batch": "Forward_FLOPs(B, L) = 8.27e+06 \u00d7 B \u00d7 L",
+    "backward_batch": "Backward_FLOPs(B, L) = 1.65e+07 \u00d7 B \u00d7 L",
+    "total_batch": "Total_FLOPs(B, L) = 2.48e+07 \u00d7 B \u00d7 L",
+    "epoch_forward": "Epoch_Forward_FLOPs(L, N) \u2248 8.27e+06 \u00d7 L \u00d7 N",
+    "epoch_backward": "Epoch_Backward_FLOPs(L, N) \u2248 1.65e+07 \u00d7 L \u00d7 N",
+    "epoch_total": "Epoch_Total_FLOPs(L, N) \u2248 2.48e+07 \u00d7 L \u00d7 N",
+    "training_total": "Training_Total_FLOPs(L, N, E) \u2248 2.48e+07 \u00d7 L \u00d7 N \u00d7 E"
+  }
+}
