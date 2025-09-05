@@ -180,9 +180,15 @@ def main():
     file_prefix = "018_00000_text_document"
     
     try:
-        # 加载数据集
-        print("正在加载 OpenSeek-Pretrain-100B 数据集...")
-        dataset = load_openseek_dataset(data_dir, file_prefix)
+        # 首先尝试使用健壮加载器
+        print("正在使用健壮加载器加载 OpenSeek-Pretrain-100B 数据集...")
+        try:
+            from robust_openseek_loader import load_openseek_dataset_robust
+            dataset = load_openseek_dataset_robust(data_dir, file_prefix)
+        except Exception as robust_error:
+            print(f"健壮加载器失败: {robust_error}")
+            print("尝试使用原始加载器...")
+            dataset = load_openseek_dataset(data_dir, file_prefix)
         
         print(f"数据集加载成功！")
         print(f"文档总数: {len(dataset)}")
