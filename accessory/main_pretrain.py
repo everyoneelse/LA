@@ -95,6 +95,12 @@ def get_args_parser():
                         help='use packed dataset')
     parser.add_argument('--max_words', default=2048, type=int,
                         help='max token length')
+    
+    # Validation dataset parameters (optional, for separate validation set)
+    parser.add_argument('--val_data_meta_path', default=None, type=str,
+                        help='path to validation data meta file (optional, if not provided, will use last file from train set)')
+    parser.add_argument('--val_data_root', default=None, type=str,
+                        help='root path for validation data (optional, defaults to --data_root if not provided)')
 
     parser.add_argument('--output_dir', default='./output_dir',
                         help='path where to save, empty for no saving')
@@ -243,8 +249,18 @@ def main(args):
         args.data_meta_path, args.data_root, tokenizer_path=args.tokenizer_path,
         max_words=args.max_words, num_processes=dp_world_size, process_rank=dp_rank,
     )
-    dataset_val = DatasetValCls(args.data_meta_path, args.data_root, tokenizer_path=args.tokenizer_path,
-                                max_words=args.max_words)
+    
+    # 创建验证数据集，支持独立的验证数据集配置
+    if args.packed_data:
+        dataset_val = DatasetValCls(
+            args.data_meta_path, args.data_root, tokenizer_path=args.tokenizer_path,
+            max_words=args.max_words, 
+            val_data_meta_path=args.val_data_meta_path,
+            val_data_root=args.val_data_root
+        )
+    else:
+        dataset_val = DatasetValCls(args.data_meta_path, args.data_root, tokenizer_path=args.tokenizer_path,
+                                    max_words=args.max_words)
     print(dataset_train)
 
     if global_rank == 0 and args.output_dir is not None:
