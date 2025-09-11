@@ -51,63 +51,143 @@ def load_hellaswag_data(data_dir: str, max_samples: Optional[int] = None) -> Lis
     return data
 
 
-def calculate_perplexity(model, text: str, device: str = 'cuda') -> float:
+def calculate_perplexity_batch(model, texts: List[str], device: str = 'cuda', max_length: int = 512) -> List[float]:
     """
-    Calculate perplexity of a text using the model.
-    
-    Note: The model (MetaModel) expects input_ids and labels in the same format,
-    and handles the label shifting internally:
-    - output = output[:, :-1, :]  (remove last output token)
-    - labels = labels[:, 1:]      (remove first label token, i.e., BOS)
-    This ensures proper next-token prediction alignment.
+    Calculate perplexity for a batch of texts with proper padding to ensure same length.
+    This prevents distributed training deadlocks caused by different sequence lengths.
     """
     try:
-        # Tokenize the text
-        tokens = model.tokenizer.encode(text, bos=True, eos=False)
-        if len(tokens) == 0:
-            return float('inf')
+        if not texts:
+            return []
         
-        # Convert to tensor
-        input_ids = torch.tensor([tokens], dtype=torch.long, device=device)
+        # Tokenize all texts
+        all_tokens = []
+        for text in texts:
+            tokens = model.tokenizer.encode(text, bos=True, eos=False)
+            if len(tokens) == 0:
+                tokens = [model.tokenizer.bos_id]  # At least have BOS token
+            all_tokens.append(tokens)
         
-        # Create labels for loss calculation
-        # The model expects labels in the same format as input_ids
-        # It will handle the shifting internally (see model/meta.py line 248-249)
-        labels = input_ids.clone()
+        # Find the maximum length in this batch
+        if max_length is None:
+            max_len = max(len(tokens) for tokens in all_tokens)
+        else:
+            max_len = max_length
+            
+        # Pad all sequences to the same length
+        batch_input_ids = []
+        batch_labels = []
         
-        # Set BOS token to -100 to ignore it in loss calculation
-        # This is because we typically don't want to predict the BOS token
-        labels[:, 0] = -100
+        for tokens in all_tokens:
+            # Truncate if too long
+            if len(tokens) > max_len:
+                tokens = tokens[:max_len]
+            
+            # Pad to max_len
+            padded_tokens = tokens + [model.tokenizer.pad_id] * (max_len - len(tokens))
+            
+            # Create input_ids and labels
+            input_ids = torch.tensor(padded_tokens, dtype=torch.long)
+            labels = input_ids.clone()
+            
+            # Set padding tokens to -100 (ignore in loss)
+            labels[len(tokens):] = -100
+            # Set BOS token to -100 (ignore in loss)
+            labels[0] = -100
+            
+            batch_input_ids.append(input_ids)
+            batch_labels.append(labels)
         
-        # Forward pass - simplified for distributed stability
+        # Stack into batch tensors
+        batch_input_ids = torch.stack(batch_input_ids).to(device)
+        batch_labels = torch.stack(batch_labels).to(device)
+        
+        # Forward pass
         with torch.no_grad():
-            loss, _ = model(input_ids, labels)
-            perplexity = torch.exp(loss).item()
-            return perplexity
+            loss, _ = model(batch_input_ids, batch_labels)
+            
+            # Calculate per-sample perplexity
+            # The returned loss is averaged across valid tokens in the batch
+            # For proper per-sample evaluation, we need to calculate individual losses
+            
+            # Get model output for detailed loss calculation
+            output = model.llma(batch_input_ids, None)
+            if isinstance(output, tuple):
+                output = output[0]
+            
+            # Shift for next token prediction
+            output = output[:, :-1, :]  # [batch_size, seq_len-1, vocab_size]
+            shifted_labels = batch_labels[:, 1:]  # [batch_size, seq_len-1]
+            
+            # Calculate loss for each sample
+            criterion = torch.nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
+            per_token_losses = criterion(output.reshape(-1, output.size(-1)), shifted_labels.reshape(-1))
+            per_token_losses = per_token_losses.view(batch_input_ids.size(0), -1)  # [batch_size, seq_len-1]
+            
+            # Calculate per-sample average loss (ignoring -100 tokens)
+            per_sample_losses = []
+            for i in range(batch_input_ids.size(0)):
+                valid_tokens = (shifted_labels[i] != -100)
+                if valid_tokens.sum() > 0:
+                    sample_loss = per_token_losses[i][valid_tokens].mean()
+                    per_sample_losses.append(torch.exp(sample_loss).item())
+                else:
+                    per_sample_losses.append(float('inf'))
+            
+            return per_sample_losses
+            
     except Exception as e:
-        print(f"Warning: Error calculating perplexity: {e}")
-        return float('inf')
+        print(f"Warning: Error calculating batch perplexity: {e}")
+        return [float('inf')] * len(texts)
 
 
-def evaluate_hellaswag_batch(model, batch_data: List[Dict[str, Any]], device: str = 'cuda') -> List[Dict[str, Any]]:
-    """Evaluate a batch of HellaSwag examples"""
+def calculate_perplexity(model, text: str, device: str = 'cuda') -> float:
+    """
+    Calculate perplexity of a single text (wrapper for batch function).
+    """
+    result = calculate_perplexity_batch(model, [text], device)
+    return result[0] if result else float('inf')
+
+
+def evaluate_hellaswag_batch(model, batch_data: List[Dict[str, Any]], device: str = 'cuda', max_length: int = 512) -> List[Dict[str, Any]]:
+    """Evaluate a batch of HellaSwag examples with efficient batch processing"""
     results = []
     
-    for item in batch_data:
+    # Collect all texts that need evaluation
+    all_texts = []
+    text_to_item_ending = []  # (item_idx, ending_idx)
+    
+    for item_idx, item in enumerate(batch_data):
         ctx = item['ctx']
         endings = item['endings']
-        label = item['label'] if 'label' in item else None
         
-        # Calculate perplexity for each ending
-        perplexities = []
-        for ending in endings:
-            # Create full text by combining context and ending
+        for ending_idx, ending in enumerate(endings):
             full_text = ctx + " " + ending
-            ppl = calculate_perplexity(model, full_text, device)
-            perplexities.append(ppl)
+            all_texts.append(full_text)
+            text_to_item_ending.append((item_idx, ending_idx))
+    
+    # Batch calculate perplexities for all texts
+    if all_texts:
+        all_perplexities = calculate_perplexity_batch(model, all_texts, device, max_length)
+    else:
+        all_perplexities = []
+    
+    # Reconstruct results
+    for item_idx, item in enumerate(batch_data):
+        label = item['label'] if 'label' in item else None
+        num_endings = len(item['endings'])
+        
+        # Extract perplexities for this item
+        perplexities = []
+        for ending_idx in range(num_endings):
+            # Find the perplexity for this item's ending
+            for text_idx, (t_item_idx, t_ending_idx) in enumerate(text_to_item_ending):
+                if t_item_idx == item_idx and t_ending_idx == ending_idx:
+                    perplexities.append(all_perplexities[text_idx])
+                    break
         
         # Predict the ending with lowest perplexity
-        predicted_idx = np.argmin(perplexities)
+        predicted_idx = np.argmin(perplexities) if perplexities else 0
         
         result = {
             'predicted': predicted_idx,
@@ -128,8 +208,8 @@ def batch_data(data_list: List, batch_size: int = 1) -> List[List]:
     return batches
 
 
-def run_hellaswag_evaluation(model, data_dir: str, batch_size: int = 8, 
-                           max_samples: Optional[int] = None, device: str = 'cuda') -> Dict[str, float]:
+def run_hellaswag_evaluation(model, data_dir: str, batch_size: int = 4, 
+                           max_samples: Optional[int] = None, device: str = 'cuda', max_length: int = 512) -> Dict[str, float]:
     """
     Run HellaSwag evaluation on the model
     

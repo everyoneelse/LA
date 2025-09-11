@@ -15,28 +15,7 @@ from accessory.util import misc, tensor_parallel
 from accessory.util.tensor_type import default_tensor_type
 import torch.distributed as dist
 
-def safe_tensor_debug(tensor, name="tensor", max_elements=10):
-    """Safely print tensor info without causing CUDA sync issues in debugger"""
-    try:
-        if tensor is None:
-            print(f"DEBUG {name}: None")
-            return
-        
-        print(f"DEBUG {name}: shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}")
-        
-        # Only print values if tensor is small or we're not in distributed mode
-        if tensor.numel() <= max_elements or not (torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1):
-            if tensor.is_cuda:
-                values = tensor.cpu().flatten()[:max_elements].tolist()
-            else:
-                values = tensor.flatten()[:max_elements].tolist()
-            print(f"DEBUG {name} values: {values}")
-        else:
-            print(f"DEBUG {name}: skipping values (distributed mode or large tensor)")
-    except Exception as e:
-        print(f"DEBUG {name}: error accessing tensor - {e}")
 
-# Removed complex distributed_safe_operation - the real fix is simpler
 
 
 class MetaModel(nn.Module):
@@ -248,33 +227,20 @@ class MetaModel(nn.Module):
 
     def forward(self, examples, labels, images=None):
         with torch.no_grad():
-            # CRITICAL FIX for HellaSwag distributed deadlock:
-            # The issue is that different processes have different sequence lengths,
-            # causing torch.count_nonzero to take different amounts of time and
-            # leading to distributed synchronization deadlock.
-            
-            # Solution: Skip the problematic sequence length optimization in eval mode
-            # This optimization is mainly for training efficiency, not correctness
-            if self.training:
-                # Original logic for training (where all sequences have same length)
-                non_zero_ = torch.count_nonzero(labels, dim=0)
-                pos = non_zero_.shape[0] - 1
-                while pos >= 0:
-                    if non_zero_[pos] == 0:
-                        pos -= 1
-                    else:
-                        break
+            non_zero_ = torch.count_nonzero(labels, dim=0)
+            pos = non_zero_.shape[0] - 1
+            while pos >= 0:
+                if non_zero_[pos] == 0:
+                    pos -= 1
+                else:
+                    break
 
-                if pos == -1:  # nothing to predict in the whole batch
-                    rank = dist.get_rank() if dist.is_initialized() else 0
-                    print(f"[RANK {rank}] nothing to predict in the whole batch!")
-                    pos = 2
-                examples = examples[:, :pos+1]
-                labels = labels[:, :pos+1]
-            else:
-                # Eval mode: skip sequence length optimization to avoid distributed issues
-                # Just use the full sequences as provided
-                pass
+            if pos == -1:  # nothing to predict in the whole batch
+                print(f"[RANK {dist.get_rank()}] nothing to predict in the whole batch!", force=True)
+                print(examples.cpu().tolist(), force=True)
+                pos = 2
+            examples = examples[:, :pos+1]
+            labels = labels[:, :pos+1]
 
         output = self.llma(examples, images)
         if isinstance(output, tuple):

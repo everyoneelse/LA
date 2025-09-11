@@ -172,8 +172,8 @@ def evaluate_hellaswag_batch(model, batch_data: List[Dict[str, Any]]) -> List[Di
     return results
 
 def run_hellaswag_inference(model, data: List[Dict[str, Any]], batch_size: int = 8) -> List[Dict[str, Any]]:
-    """Run inference on HellaSwag data"""
-    model.eval()  # CRITICAL: Set to eval mode to avoid sequence length optimization deadlock
+    """Run inference on HellaSwag data with batch processing and padding"""
+    model.eval()
     
     # Batch the data
     batched_data = batch_data(data, batch_size)
