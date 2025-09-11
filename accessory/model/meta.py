@@ -224,8 +224,78 @@ class MetaModel(nn.Module):
             value.requires_grad = True
 
     def forward(self, examples, labels, images=None):
+        # Debug: Check tensor properties before torch.no_grad()
+        print(f"[DEBUG] Before torch.no_grad() - labels device: {labels.device}")
+        print(f"[DEBUG] Before torch.no_grad() - labels shape: {labels.shape}")
+        print(f"[DEBUG] Before torch.no_grad() - labels dtype: {labels.dtype}")
+        print(f"[DEBUG] Before torch.no_grad() - labels requires_grad: {labels.requires_grad}")
+        
+        # Check CUDA memory
+        if torch.cuda.is_available():
+            print(f"[DEBUG] CUDA memory allocated: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
+            print(f"[DEBUG] CUDA memory cached: {torch.cuda.memory_reserved() / 1024**2:.2f} MB")
+        
+        # Potential workaround: Force CUDA synchronization before accessing tensor
+        if labels.is_cuda:
+            torch.cuda.synchronize(labels.device)
+            print(f"[DEBUG] CUDA synchronized for device {labels.device}")
+        
+        # Potential workaround: Create a detached copy to avoid gradient tracking issues
+        labels_detached = labels.detach()
+        print(f"[DEBUG] Created detached labels copy")
+        
         with torch.no_grad():
-            non_zero_ = torch.count_nonzero(labels, dim=0)
+            print(f"[DEBUG] Inside torch.no_grad() - about to access labels")
+            # Try to access labels step by step
+            try:
+                print(f"[DEBUG] labels.device: {labels_detached.device}")
+                print(f"[DEBUG] labels.shape: {labels_detached.shape}")
+                print(f"[DEBUG] About to call torch.count_nonzero...")
+                
+                # Alternative approach: Avoid torch.count_nonzero entirely
+                # Instead of counting non-zero elements, find the last non-zero position directly
+                print(f"[DEBUG] Using alternative approach to avoid torch.count_nonzero")
+                
+                # Method 1: Use boolean indexing to avoid count_nonzero
+                try:
+                    # Create a mask for non-zero elements
+                    non_zero_mask = (labels_detached != 0).any(dim=0)  # Shape: [seq_len]
+                    print(f"[DEBUG] Created non_zero_mask successfully")
+                    
+                    # Find the last True position
+                    if non_zero_mask.any():
+                        # Get indices where mask is True and take the last one
+                        non_zero_indices = torch.nonzero(non_zero_mask, as_tuple=False).squeeze(-1)
+                        last_non_zero_pos = non_zero_indices[-1].item() if len(non_zero_indices) > 0 else -1
+                    else:
+                        last_non_zero_pos = -1
+                    
+                    print(f"[DEBUG] Found last non-zero position: {last_non_zero_pos}")
+                    
+                    # Create a dummy non_zero_ tensor for compatibility with existing code
+                    seq_len = labels_detached.shape[1]
+                    non_zero_ = torch.zeros(seq_len, device=labels_detached.device, dtype=torch.long)
+                    # Mark positions up to last_non_zero_pos as having non-zero elements
+                    if last_non_zero_pos >= 0:
+                        non_zero_[:last_non_zero_pos + 1] = 1
+                    
+                    print(f"[DEBUG] Alternative method completed successfully")
+                    
+                except Exception as fallback_e:
+                    print(f"[DEBUG] Alternative method failed: {fallback_e}, trying original approach...")
+                    # Fallback to original method with CPU
+                    if labels_detached.is_cuda:
+                        labels_cpu = labels_detached.cpu()
+                        non_zero_ = torch.count_nonzero(labels_cpu, dim=0).to(labels_detached.device)
+                    else:
+                        non_zero_ = torch.count_nonzero(labels_detached, dim=0)
+                    print(f"[DEBUG] Fallback method completed")
+                    
+            except Exception as e:
+                print(f"[DEBUG] Exception occurred: {e}")
+                print(f"[DEBUG] Exception type: {type(e)}")
+                raise
+            
             pos = non_zero_.shape[0] - 1
             while pos >= 0:
                 if non_zero_[pos] == 0:
@@ -238,7 +308,7 @@ class MetaModel(nn.Module):
                 print(examples.cpu().tolist(), force=True)
                 pos = 2
             examples = examples[:, :pos+1]
-            labels = labels[:, :pos+1]
+            labels_detached = labels_detached[:, :pos+1]
 
         output = self.llma(examples, images)
         if isinstance(output, tuple):
@@ -246,12 +316,12 @@ class MetaModel(nn.Module):
         else:
             additional_loss = {}
         output = output[:, :-1, :]
-        labels = labels[:, 1:]
+        labels_detached = labels_detached[:, 1:]
 
-        if labels.sum() == 0:
+        if labels_detached.sum() == 0:
            c_loss = output.mean() * 0
         else:
-           c_loss = self.criterion(output.reshape(-1, self.tokenizer.n_words), labels.flatten())
+           c_loss = self.criterion(output.reshape(-1, self.tokenizer.n_words), labels_detached.flatten())
         return c_loss, additional_loss
 
     @ torch.inference_mode()
