@@ -128,6 +128,16 @@ def get_args_parser():
                         help='if set, limit number of validation batches per run')
     parser.add_argument('--val_device', type=str, default=None,
                         help='device for background validation (e.g., cuda:1). If None, use current device')
+    
+    # HellaSwag evaluation controls
+    parser.add_argument('--hellaswag_eval', action='store_true', default=False,
+                        help='enable HellaSwag evaluation during validation')
+    parser.add_argument('--hellaswag_data_dir', type=str, default='data/hellaswag/',
+                        help='directory containing HellaSwag data')
+    parser.add_argument('--hellaswag_batch_size', type=int, default=4,
+                        help='batch size for HellaSwag evaluation')
+    parser.add_argument('--hellaswag_max_samples', type=int, default=None,
+                        help='maximum number of HellaSwag samples to evaluate (None for all)')
 
     return parser
 
