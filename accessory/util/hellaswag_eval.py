@@ -55,7 +55,10 @@ def calculate_perplexity_batch(model, texts: List[str], device: str = 'cuda', ma
     """
     Calculate perplexity for a batch of texts with proper padding to ensure same length.
     This prevents distributed training deadlocks caused by different sequence lengths.
-    Handles mixed precision (BFloat16/Float16) properly.
+    Handles mixed precision (BFloat16/Float16) and model parallel properly.
+    
+    Note: In model parallel environments, we process samples individually to avoid
+    embedding weight distribution issues.
     """
     try:
         if not texts:
@@ -108,11 +111,7 @@ def calculate_perplexity_batch(model, texts: List[str], device: str = 'cuda', ma
             # First, detect the model's dtype from its parameters
             model_dtype = next(model.parameters()).dtype
             
-            # Use the model's forward method which handles dtype properly
-            loss, _ = model(batch_input_ids, batch_labels)
-            
-            # For per-sample loss calculation, we need to be more careful about dtypes
-            # Get model output with proper autocast context
+            # Set up autocast context based on model dtype
             if model_dtype == torch.bfloat16:
                 autocast_ctx = torch.cuda.amp.autocast(dtype=torch.bfloat16)
             elif model_dtype == torch.float16:
@@ -120,29 +119,19 @@ def calculate_perplexity_batch(model, texts: List[str], device: str = 'cuda', ma
             else:
                 autocast_ctx = torch.cuda.amp.autocast(dtype=torch.float32)
             
-            with autocast_ctx:
-                output = model.llma(batch_input_ids, None)
-                if isinstance(output, tuple):
-                    output = output[0]
-                
-                # Shift for next token prediction
-                output = output[:, :-1, :]  # [batch_size, seq_len-1, vocab_size]
-                shifted_labels = batch_labels[:, 1:]  # [batch_size, seq_len-1]
-                
-                # Calculate loss for each sample with proper dtype
-                criterion = torch.nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
-                per_token_losses = criterion(output.reshape(-1, output.size(-1)), shifted_labels.reshape(-1))
-                per_token_losses = per_token_losses.view(batch_input_ids.size(0), -1)  # [batch_size, seq_len-1]
-            
-            # Calculate per-sample average loss (ignoring -100 tokens)
+            # For model parallel safety, process each sample individually
+            # This avoids embedding weight distribution issues
             per_sample_losses = []
+            
             for i in range(batch_input_ids.size(0)):
-                valid_tokens = (shifted_labels[i] != -100)
-                if valid_tokens.sum() > 0:
-                    sample_loss = per_token_losses[i][valid_tokens].mean()
-                    per_sample_losses.append(torch.exp(sample_loss).item())
-                else:
-                    per_sample_losses.append(float('inf'))
+                single_input = batch_input_ids[i:i+1]  # [1, seq_len]
+                single_labels = batch_labels[i:i+1]    # [1, seq_len]
+                
+                with autocast_ctx:
+                    # Use the model's forward method which handles model parallel correctly
+                    single_loss, _ = model(single_input, single_labels)
+                    single_ppl = torch.exp(single_loss).item()
+                    per_sample_losses.append(single_ppl)
             
             return per_sample_losses
             

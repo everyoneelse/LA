@@ -175,8 +175,12 @@ def run_hellaswag_inference(model, data: List[Dict[str, Any]], batch_size: int =
     """Run inference on HellaSwag data with batch processing and padding"""
     model.eval()
     
+    # In model parallel environments, we process samples individually within each "batch"
+    # So we can use larger batch sizes for data organization
+    effective_batch_size = min(batch_size, 16)  # Cap at 16 to avoid memory issues
+    
     # Batch the data
-    batched_data = batch_data(data, batch_size)
+    batched_data = batch_data(data, effective_batch_size)
     
     all_results = []
     for batch in tqdm(batched_data, desc="Evaluating HellaSwag"):
