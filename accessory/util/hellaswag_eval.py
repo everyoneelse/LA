@@ -55,6 +55,7 @@ def calculate_perplexity_batch(model, texts: List[str], device: str = 'cuda', ma
     """
     Calculate perplexity for a batch of texts with proper padding to ensure same length.
     This prevents distributed training deadlocks caused by different sequence lengths.
+    Handles mixed precision (BFloat16/Float16) properly.
     """
     try:
         if not texts:
@@ -102,27 +103,36 @@ def calculate_perplexity_batch(model, texts: List[str], device: str = 'cuda', ma
         batch_input_ids = torch.stack(batch_input_ids).to(device)
         batch_labels = torch.stack(batch_labels).to(device)
         
-        # Forward pass
+        # Forward pass with proper dtype handling
         with torch.no_grad():
+            # First, detect the model's dtype from its parameters
+            model_dtype = next(model.parameters()).dtype
+            
+            # Use the model's forward method which handles dtype properly
             loss, _ = model(batch_input_ids, batch_labels)
             
-            # Calculate per-sample perplexity
-            # The returned loss is averaged across valid tokens in the batch
-            # For proper per-sample evaluation, we need to calculate individual losses
+            # For per-sample loss calculation, we need to be more careful about dtypes
+            # Get model output with proper autocast context
+            if model_dtype == torch.bfloat16:
+                autocast_ctx = torch.cuda.amp.autocast(dtype=torch.bfloat16)
+            elif model_dtype == torch.float16:
+                autocast_ctx = torch.cuda.amp.autocast(dtype=torch.float16)
+            else:
+                autocast_ctx = torch.cuda.amp.autocast(dtype=torch.float32)
             
-            # Get model output for detailed loss calculation
-            output = model.llma(batch_input_ids, None)
-            if isinstance(output, tuple):
-                output = output[0]
-            
-            # Shift for next token prediction
-            output = output[:, :-1, :]  # [batch_size, seq_len-1, vocab_size]
-            shifted_labels = batch_labels[:, 1:]  # [batch_size, seq_len-1]
-            
-            # Calculate loss for each sample
-            criterion = torch.nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
-            per_token_losses = criterion(output.reshape(-1, output.size(-1)), shifted_labels.reshape(-1))
-            per_token_losses = per_token_losses.view(batch_input_ids.size(0), -1)  # [batch_size, seq_len-1]
+            with autocast_ctx:
+                output = model.llma(batch_input_ids, None)
+                if isinstance(output, tuple):
+                    output = output[0]
+                
+                # Shift for next token prediction
+                output = output[:, :-1, :]  # [batch_size, seq_len-1, vocab_size]
+                shifted_labels = batch_labels[:, 1:]  # [batch_size, seq_len-1]
+                
+                # Calculate loss for each sample with proper dtype
+                criterion = torch.nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
+                per_token_losses = criterion(output.reshape(-1, output.size(-1)), shifted_labels.reshape(-1))
+                per_token_losses = per_token_losses.view(batch_input_ids.size(0), -1)  # [batch_size, seq_len-1]
             
             # Calculate per-sample average loss (ignoring -100 tokens)
             per_sample_losses = []
@@ -138,7 +148,34 @@ def calculate_perplexity_batch(model, texts: List[str], device: str = 'cuda', ma
             
     except Exception as e:
         print(f"Warning: Error calculating batch perplexity: {e}")
-        return [float('inf')] * len(texts)
+        # Fallback: try individual calculation to isolate the problem
+        try:
+            print("Attempting fallback to individual perplexity calculation...")
+            fallback_results = []
+            for text in texts:
+                try:
+                    # Simple individual calculation
+                    tokens = model.tokenizer.encode(text, bos=True, eos=False)
+                    if len(tokens) == 0:
+                        fallback_results.append(float('inf'))
+                        continue
+                    
+                    input_ids = torch.tensor([tokens], dtype=torch.long, device=device)
+                    labels = input_ids.clone()
+                    labels[:, 0] = -100
+                    
+                    with torch.no_grad():
+                        loss, _ = model(input_ids, labels)
+                        ppl = torch.exp(loss).item()
+                        fallback_results.append(ppl)
+                except Exception as inner_e:
+                    print(f"Individual calculation failed for text: {inner_e}")
+                    fallback_results.append(float('inf'))
+            
+            return fallback_results
+        except Exception as fallback_e:
+            print(f"Fallback also failed: {fallback_e}")
+            return [float('inf')] * len(texts)
 
 
 def calculate_perplexity(model, text: str, device: str = 'cuda') -> float:
