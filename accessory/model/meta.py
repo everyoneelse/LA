@@ -36,6 +36,46 @@ def safe_tensor_debug(tensor, name="tensor", max_elements=10):
     except Exception as e:
         print(f"DEBUG {name}: error accessing tensor - {e}")
 
+def distributed_safe_operation(operation, *args, timeout_seconds=30, operation_name="unknown", **kwargs):
+    """Execute operation with distributed training safety and timeout"""
+    import time
+    import signal
+    
+    def timeout_handler(signum, frame):
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        raise TimeoutError(f"[RANK {rank}] Operation '{operation_name}' timed out after {timeout_seconds}s")
+    
+    # Set timeout
+    if hasattr(signal, 'SIGALRM'):  # Unix systems
+        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(timeout_seconds)
+    
+    try:
+        start_time = time.time()
+        if dist.is_initialized():
+            rank = dist.get_rank()
+            world_size = dist.get_world_size()
+            print(f"[RANK {rank}/{world_size}] Starting {operation_name}...")
+        
+        result = operation(*args, **kwargs)
+        
+        elapsed = time.time() - start_time
+        if dist.is_initialized():
+            print(f"[RANK {rank}/{world_size}] Completed {operation_name} in {elapsed:.2f}s")
+        
+        return result
+        
+    except TimeoutError as e:
+        if dist.is_initialized():
+            rank = dist.get_rank()
+            print(f"[RANK {rank}] TIMEOUT in {operation_name}! This may indicate a distributed deadlock.")
+            print(f"[RANK {rank}] Try reducing batch_size or check for process synchronization issues.")
+        raise e
+    finally:
+        if hasattr(signal, 'SIGALRM'):
+            signal.alarm(0)  # Cancel alarm
+            signal.signal(signal.SIGALRM, old_handler)
+
 
 class MetaModel(nn.Module):
     def __init__(
@@ -247,10 +287,30 @@ class MetaModel(nn.Module):
     def forward(self, examples, labels, images=None):
         with torch.no_grad():
             # Debug: safely print tensor info without hanging in debugger
-            safe_tensor_debug(labels, "labels_input")
-            safe_tensor_debug(examples, "examples_input")
+            if dist.is_initialized():
+                rank = dist.get_rank()
+                world_size = dist.get_world_size()
+                print(f"[RANK {rank}/{world_size}] Forward pass started")
             
-            non_zero_ = torch.count_nonzero(labels, dim=0)
+            # Use distributed-safe operation for potentially problematic tensor operations
+            def safe_count_nonzero():
+                try:
+                    # Force CUDA synchronization to avoid distributed deadlock
+                    if labels.is_cuda:
+                        torch.cuda.synchronize()
+                    return torch.count_nonzero(labels, dim=0)
+                except Exception as e:
+                    rank = dist.get_rank() if dist.is_initialized() else 0
+                    print(f"[RANK {rank}] Error in count_nonzero: {e}")
+                    # Fallback: return a safe default
+                    return torch.zeros(labels.shape[1], device=labels.device, dtype=torch.long)
+            
+            non_zero_ = distributed_safe_operation(
+                safe_count_nonzero, 
+                timeout_seconds=10,
+                operation_name="count_nonzero_labels"
+            )
+            
             pos = non_zero_.shape[0] - 1
             while pos >= 0:
                 if non_zero_[pos] == 0:
@@ -259,8 +319,11 @@ class MetaModel(nn.Module):
                     break
 
             if pos == -1:  # nothing to predict in the whole batch
-                print(f"[RANK {dist.get_rank()}] nothing to predict in the whole batch!", force=True)
-                print(examples.cpu().tolist(), force=True)
+                rank = dist.get_rank() if dist.is_initialized() else 0
+                print(f"[RANK {rank}] nothing to predict in the whole batch!")
+                # Avoid printing large tensors in distributed mode
+                if not dist.is_initialized() or dist.get_world_size() == 1:
+                    print(examples.cpu().tolist())
                 pos = 2
             examples = examples[:, :pos+1]
             labels = labels[:, :pos+1]

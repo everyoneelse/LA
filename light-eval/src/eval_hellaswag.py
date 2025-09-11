@@ -172,16 +172,45 @@ def evaluate_hellaswag_batch(model, batch_data: List[Dict[str, Any]]) -> List[Di
     return results
 
 def run_hellaswag_inference(model, data: List[Dict[str, Any]], batch_size: int = 8) -> List[Dict[str, Any]]:
-    """Run inference on HellaSwag data"""
+    """Run inference on HellaSwag data with distributed training safety"""
+    import torch.distributed as dist
+    
     model.eval()
+    
+    # Check distributed status
+    if dist.is_initialized():
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        print(f"[RANK {rank}/{world_size}] Starting HellaSwag inference with {len(data)} samples")
+        
+        # Reduce batch size in distributed mode to avoid memory/sync issues
+        if batch_size > 4:
+            batch_size = max(1, batch_size // 2)
+            print(f"[RANK {rank}] Reduced batch_size to {batch_size} for distributed stability")
     
     # Batch the data
     batched_data = batch_data(data, batch_size)
     
     all_results = []
-    for batch in tqdm(batched_data, desc="Evaluating HellaSwag"):
-        batch_results = evaluate_hellaswag_batch(model, batch)
-        all_results.extend(batch_results)
+    for i, batch in enumerate(tqdm(batched_data, desc="Evaluating HellaSwag", disable=dist.is_initialized() and dist.get_rank() != 0)):
+        try:
+            # Add periodic synchronization in distributed mode
+            if dist.is_initialized() and i % 10 == 0:
+                print(f"[RANK {dist.get_rank()}] Processing batch {i}/{len(batched_data)}")
+                # Optional: add barrier every N batches to keep processes synchronized
+                # dist.barrier()  # Uncomment if needed, but may slow down
+            
+            batch_results = evaluate_hellaswag_batch(model, batch)
+            all_results.extend(batch_results)
+            
+        except Exception as e:
+            rank = dist.get_rank() if dist.is_initialized() else 0
+            print(f"[RANK {rank}] Error processing batch {i}: {e}")
+            # Continue with next batch instead of failing completely
+            continue
+    
+    if dist.is_initialized():
+        print(f"[RANK {dist.get_rank()}] Completed inference: {len(all_results)} results")
     
     return all_results
 

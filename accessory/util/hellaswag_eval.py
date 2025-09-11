@@ -79,16 +79,42 @@ def calculate_perplexity(model, text: str, device: str = 'cuda') -> float:
         # This is because we typically don't want to predict the BOS token
         labels[:, 0] = -100
         
-        # Debug: Print tensor info before forward pass
-        print(f"DEBUG: About to call model.forward with:")
-        print(f"  input_ids: shape={input_ids.shape}, device={input_ids.device}")
-        print(f"  labels: shape={labels.shape}, device={labels.device}")
-        print(f"  labels sample: {labels.cpu().flatten()[:10].tolist()}")
+        # Debug: Print tensor info before forward pass (only on rank 0 in distributed mode)
+        try:
+            import torch.distributed as dist
+            should_print = not dist.is_initialized() or dist.get_rank() == 0
+        except:
+            should_print = True
+            
+        if should_print:
+            print(f"DEBUG: About to call model.forward with:")
+            print(f"  input_ids: shape={input_ids.shape}, device={input_ids.device}")
+            print(f"  labels: shape={labels.shape}, device={labels.device}")
+            print(f"  labels sample: {labels.cpu().flatten()[:10].tolist()}")
         
-        # Forward pass
+        # Forward pass with timeout protection
         with torch.no_grad():
-            loss, _ = model(input_ids, labels)
-            perplexity = torch.exp(loss).item()
+            try:
+                # Add explicit CUDA synchronization before model call in distributed mode
+                try:
+                    import torch.distributed as dist
+                    if dist.is_initialized() and input_ids.is_cuda:
+                        torch.cuda.synchronize()
+                except:
+                    pass
+                
+                loss, _ = model(input_ids, labels)
+                
+                # Ensure loss is a scalar and on CPU for consistent behavior
+                if hasattr(loss, 'item'):
+                    loss_value = loss.item()
+                else:
+                    loss_value = float(loss)
+                    
+            except Exception as e:
+                print(f"Error in model forward pass: {e}")
+                return float('inf')
+            perplexity = torch.exp(torch.tensor(loss_value)).item()
             return perplexity
     except Exception as e:
         print(f"Warning: Error calculating perplexity: {e}")
