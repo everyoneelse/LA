@@ -52,7 +52,15 @@ def load_hellaswag_data(data_dir: str, max_samples: Optional[int] = None) -> Lis
 
 
 def calculate_perplexity(model, text: str, device: str = 'cuda') -> float:
-    """Calculate perplexity of a text using the model"""
+    """
+    Calculate perplexity of a text using the model.
+    
+    Note: The model (MetaModel) expects input_ids and labels in the same format,
+    and handles the label shifting internally:
+    - output = output[:, :-1, :]  (remove last output token)
+    - labels = labels[:, 1:]      (remove first label token, i.e., BOS)
+    This ensures proper next-token prediction alignment.
+    """
     try:
         # Tokenize the text
         tokens = model.tokenizer.encode(text, bos=True, eos=False)
@@ -63,8 +71,13 @@ def calculate_perplexity(model, text: str, device: str = 'cuda') -> float:
         input_ids = torch.tensor([tokens], dtype=torch.long, device=device)
         
         # Create labels for loss calculation
+        # The model expects labels in the same format as input_ids
+        # It will handle the shifting internally (see model/meta.py line 248-249)
         labels = input_ids.clone()
-        labels[:, 0] = -100  # Ignore the first token in loss calculation
+        
+        # Set BOS token to -100 to ignore it in loss calculation
+        # This is because we typically don't want to predict the BOS token
+        labels[:, 0] = -100
         
         # Forward pass
         with torch.no_grad():

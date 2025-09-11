@@ -103,6 +103,13 @@ The evaluation uses a perplexity-based approach:
 2. Select the ending with the lowest perplexity as the prediction
 3. Compare with the ground truth label to determine correctness
 
+**Technical Details:**
+- The model (MetaModel) expects `input_ids` and `labels` in the same format
+- Label shifting is handled internally by the model:
+  - `output = output[:, :-1, :]` (removes last output token)
+  - `labels = labels[:, 1:]` (removes first label token, i.e., BOS)
+- We set `labels[:, 0] = -100` to ignore the BOS token in loss calculation
+
 ### Integration Points
 
 The evaluation is integrated at two points in the training loop:
