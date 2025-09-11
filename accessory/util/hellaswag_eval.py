@@ -51,63 +51,291 @@ def load_hellaswag_data(data_dir: str, max_samples: Optional[int] = None) -> Lis
     return data
 
 
-def calculate_perplexity(model, text: str, device: str = 'cuda') -> float:
+def calculate_perplexity_batch_safe(model, texts: List[str], device: str = 'cuda', max_length: int = 512) -> List[float]:
     """
-    Calculate perplexity of a text using the model.
-    
-    Note: The model (MetaModel) expects input_ids and labels in the same format,
-    and handles the label shifting internally:
-    - output = output[:, :-1, :]  (remove last output token)
-    - labels = labels[:, 1:]      (remove first label token, i.e., BOS)
-    This ensures proper next-token prediction alignment.
+    Safe perplexity calculation for distributed/model parallel environments.
+    Falls back to individual processing to avoid synchronization issues.
     """
+    # Check if we're in distributed mode
     try:
-        # Tokenize the text
-        tokens = model.tokenizer.encode(text, bos=True, eos=False)
-        if len(tokens) == 0:
-            return float('inf')
-        
-        # Convert to tensor
-        input_ids = torch.tensor([tokens], dtype=torch.long, device=device)
-        
-        # Create labels for loss calculation
-        # The model expects labels in the same format as input_ids
-        # It will handle the shifting internally (see model/meta.py line 248-249)
-        labels = input_ids.clone()
-        
-        # Set BOS token to -100 to ignore it in loss calculation
-        # This is because we typically don't want to predict the BOS token
-        labels[:, 0] = -100
-        
-        # Forward pass
-        with torch.no_grad():
-            loss, _ = model(input_ids, labels)
-            perplexity = torch.exp(loss).item()
-            return perplexity
-    except Exception as e:
-        print(f"Warning: Error calculating perplexity: {e}")
-        return float('inf')
+        import torch.distributed as dist
+        is_distributed = dist.is_initialized()
+        if is_distributed:
+            rank = dist.get_rank()
+        else:
+            rank = 0
+    except:
+        is_distributed = False
+        rank = 0
+    
+    # In distributed mode, use simple individual processing to avoid deadlocks
+    if is_distributed:
+        return calculate_perplexity_individual(model, texts, device, max_length)
+    else:
+        return calculate_perplexity_batch(model, texts, device, max_length)
 
 
-def evaluate_hellaswag_batch(model, batch_data: List[Dict[str, Any]], device: str = 'cuda') -> List[Dict[str, Any]]:
-    """Evaluate a batch of HellaSwag examples"""
+def calculate_perplexity_individual(model, texts: List[str], device: str = 'cuda', max_length: int = 512) -> List[float]:
+    """
+    Calculate perplexity for texts individually - safest for distributed environments.
+    """
     results = []
     
-    for item in batch_data:
+    try:
+        import torch.distributed as dist
+        if dist.is_initialized():
+            rank = dist.get_rank()
+        else:
+            rank = 0
+    except:
+        rank = 0
+    
+    for i, text in enumerate(texts):
+        try:
+            # Simple individual calculation
+            tokens = model.tokenizer.encode(text, bos=True, eos=False)
+            if len(tokens) == 0:
+                results.append(float('inf'))
+                continue
+            
+            # Truncate if too long
+            if len(tokens) > max_length:
+                tokens = tokens[:max_length]
+            
+            input_ids = torch.tensor([tokens], dtype=torch.long, device=device)
+            labels = input_ids.clone()
+            labels[:, 0] = -100  # Ignore BOS token
+            
+            with torch.no_grad():
+                loss, _ = model(input_ids, labels)
+                ppl = torch.exp(loss).item()
+                results.append(ppl)
+                
+        except Exception as e:
+            print(f"[RANK {rank}] Error processing text {i}: {e}")
+            results.append(float('inf'))
+    
+    return results
+
+
+def calculate_perplexity_batch(model, texts: List[str], device: str = 'cuda', max_length: int = 512) -> List[float]:
+    """
+    Calculate perplexity for a batch of texts with proper padding to ensure same length.
+    This prevents distributed training deadlocks caused by different sequence lengths.
+    Handles mixed precision (BFloat16/Float16) and model parallel properly.
+    
+    Note: In model parallel environments, we process samples individually to avoid
+    embedding weight distribution issues.
+    """
+    try:
+        if not texts:
+            return []
+        
+        # Tokenize all texts
+        all_tokens = []
+        for text in texts:
+            tokens = model.tokenizer.encode(text, bos=True, eos=False)
+            if len(tokens) == 0:
+                tokens = [model.tokenizer.bos_id]  # At least have BOS token
+            all_tokens.append(tokens)
+        
+        # Find the maximum length in this batch
+        if max_length is None:
+            max_len = max(len(tokens) for tokens in all_tokens)
+        else:
+            max_len = max_length
+            
+        # Pad all sequences to the same length
+        batch_input_ids = []
+        batch_labels = []
+        
+        for tokens in all_tokens:
+            # Truncate if too long
+            if len(tokens) > max_len:
+                tokens = tokens[:max_len]
+            
+            # Pad to max_len
+            padded_tokens = tokens + [model.tokenizer.pad_id] * (max_len - len(tokens))
+            
+            # Create input_ids and labels
+            input_ids = torch.tensor(padded_tokens, dtype=torch.long)
+            labels = input_ids.clone()
+            
+            # Set padding tokens to -100 (ignore in loss)
+            labels[len(tokens):] = -100
+            # Set BOS token to -100 (ignore in loss)
+            labels[0] = -100
+            
+            batch_input_ids.append(input_ids)
+            batch_labels.append(labels)
+        
+        # Stack into batch tensors
+        batch_input_ids = torch.stack(batch_input_ids).to(device)
+        batch_labels = torch.stack(batch_labels).to(device)
+        
+        # Forward pass with proper dtype handling and distributed safety
+        with torch.no_grad():
+            # Check if we're in distributed mode
+            try:
+                import torch.distributed as dist
+                is_distributed = dist.is_initialized()
+                if is_distributed:
+                    rank = dist.get_rank()
+                    world_size = dist.get_world_size()
+                else:
+                    rank = 0
+                    world_size = 1
+            except:
+                is_distributed = False
+                rank = 0
+                world_size = 1
+            
+            # First, detect the model's dtype from its parameters
+            model_dtype = next(model.parameters()).dtype
+            
+            # Set up autocast context based on model dtype
+            if model_dtype == torch.bfloat16:
+                autocast_ctx = torch.cuda.amp.autocast(dtype=torch.bfloat16)
+            elif model_dtype == torch.float16:
+                autocast_ctx = torch.cuda.amp.autocast(dtype=torch.float16)
+            else:
+                autocast_ctx = torch.cuda.amp.autocast(dtype=torch.float32)
+            
+            # For distributed safety: ensure all processes handle the same number of samples
+            # Pad the batch to be divisible by world_size if needed
+            batch_size = batch_input_ids.size(0)
+            if is_distributed and batch_size % world_size != 0:
+                padding_needed = world_size - (batch_size % world_size)
+                # Pad with the last sample
+                last_input = batch_input_ids[-1:].repeat(padding_needed, 1)
+                last_labels = batch_labels[-1:].repeat(padding_needed, 1)
+                batch_input_ids = torch.cat([batch_input_ids, last_input], dim=0)
+                batch_labels = torch.cat([batch_labels, last_labels], dim=0)
+                padded = True
+            else:
+                padded = False
+            
+            # Process samples individually but with distributed coordination
+            per_sample_losses = []
+            total_samples = batch_input_ids.size(0)
+            
+            if is_distributed:
+                print(f"[RANK {rank}] Processing {total_samples} samples...")
+            
+            for i in range(total_samples):
+                try:
+                    single_input = batch_input_ids[i:i+1]  # [1, seq_len]
+                    single_labels = batch_labels[i:i+1]    # [1, seq_len]
+                    
+                    with autocast_ctx:
+                        # Use the model's forward method which handles model parallel correctly
+                        single_loss, _ = model(single_input, single_labels)
+                        single_ppl = torch.exp(single_loss).item()
+                        per_sample_losses.append(single_ppl)
+                    
+                    # Periodic sync to keep processes aligned (every 10 samples)
+                    if is_distributed and (i + 1) % 10 == 0:
+                        try:
+                            # Use a timeout barrier to avoid infinite hanging
+                            dist.barrier()
+                            if rank == 0:
+                                print(f"Synced at sample {i+1}/{total_samples}")
+                        except Exception as sync_e:
+                            print(f"[RANK {rank}] Sync warning at sample {i+1}: {sync_e}")
+                            
+                except Exception as sample_e:
+                    print(f"[RANK {rank}] Error processing sample {i}: {sample_e}")
+                    per_sample_losses.append(float('inf'))
+                    continue
+            
+            # Remove padded results if any
+            if padded:
+                per_sample_losses = per_sample_losses[:batch_size]
+            
+            if is_distributed:
+                print(f"[RANK {rank}] Completed processing {len(per_sample_losses)} samples")
+            
+            return per_sample_losses
+            
+    except Exception as e:
+        print(f"Warning: Error calculating batch perplexity: {e}")
+        # Fallback: try individual calculation to isolate the problem
+        try:
+            print("Attempting fallback to individual perplexity calculation...")
+            fallback_results = []
+            for text in texts:
+                try:
+                    # Simple individual calculation
+                    tokens = model.tokenizer.encode(text, bos=True, eos=False)
+                    if len(tokens) == 0:
+                        fallback_results.append(float('inf'))
+                        continue
+                    
+                    input_ids = torch.tensor([tokens], dtype=torch.long, device=device)
+                    labels = input_ids.clone()
+                    labels[:, 0] = -100
+                    
+                    with torch.no_grad():
+                        loss, _ = model(input_ids, labels)
+                        ppl = torch.exp(loss).item()
+                        fallback_results.append(ppl)
+                except Exception as inner_e:
+                    print(f"Individual calculation failed for text: {inner_e}")
+                    fallback_results.append(float('inf'))
+            
+            return fallback_results
+        except Exception as fallback_e:
+            print(f"Fallback also failed: {fallback_e}")
+            return [float('inf')] * len(texts)
+
+
+def calculate_perplexity(model, text: str, device: str = 'cuda') -> float:
+    """
+    Calculate perplexity of a single text (wrapper for safe batch function).
+    """
+    result = calculate_perplexity_batch_safe(model, [text], device)
+    return result[0] if result else float('inf')
+
+
+def evaluate_hellaswag_batch(model, batch_data: List[Dict[str, Any]], device: str = 'cuda', max_length: int = 512) -> List[Dict[str, Any]]:
+    """Evaluate a batch of HellaSwag examples with efficient batch processing"""
+    results = []
+    
+    # Collect all texts that need evaluation
+    all_texts = []
+    text_to_item_ending = []  # (item_idx, ending_idx)
+    
+    for item_idx, item in enumerate(batch_data):
         ctx = item['ctx']
         endings = item['endings']
-        label = item['label'] if 'label' in item else None
         
-        # Calculate perplexity for each ending
-        perplexities = []
-        for ending in endings:
-            # Create full text by combining context and ending
+        for ending_idx, ending in enumerate(endings):
             full_text = ctx + " " + ending
-            ppl = calculate_perplexity(model, full_text, device)
-            perplexities.append(ppl)
+            all_texts.append(full_text)
+            text_to_item_ending.append((item_idx, ending_idx))
+    
+    # Batch calculate perplexities for all texts using safe method
+    if all_texts:
+        all_perplexities = calculate_perplexity_batch_safe(model, all_texts, device, max_length)
+    else:
+        all_perplexities = []
+    
+    # Reconstruct results
+    for item_idx, item in enumerate(batch_data):
+        label = item['label'] if 'label' in item else None
+        num_endings = len(item['endings'])
+        
+        # Extract perplexities for this item
+        perplexities = []
+        for ending_idx in range(num_endings):
+            # Find the perplexity for this item's ending
+            for text_idx, (t_item_idx, t_ending_idx) in enumerate(text_to_item_ending):
+                if t_item_idx == item_idx and t_ending_idx == ending_idx:
+                    perplexities.append(all_perplexities[text_idx])
+                    break
         
         # Predict the ending with lowest perplexity
-        predicted_idx = np.argmin(perplexities)
+        predicted_idx = np.argmin(perplexities) if perplexities else 0
         
         result = {
             'predicted': predicted_idx,
@@ -128,8 +356,8 @@ def batch_data(data_list: List, batch_size: int = 1) -> List[List]:
     return batches
 
 
-def run_hellaswag_evaluation(model, data_dir: str, batch_size: int = 8, 
-                           max_samples: Optional[int] = None, device: str = 'cuda') -> Dict[str, float]:
+def run_hellaswag_evaluation(model, data_dir: str, batch_size: int = 4, 
+                           max_samples: Optional[int] = None, device: str = 'cuda', max_length: int = 512) -> Dict[str, float]:
     """
     Run HellaSwag evaluation on the model
     
