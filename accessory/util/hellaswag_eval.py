@@ -79,6 +79,12 @@ def calculate_perplexity(model, text: str, device: str = 'cuda') -> float:
         # This is because we typically don't want to predict the BOS token
         labels[:, 0] = -100
         
+        # Debug: Print tensor info before forward pass
+        print(f"DEBUG: About to call model.forward with:")
+        print(f"  input_ids: shape={input_ids.shape}, device={input_ids.device}")
+        print(f"  labels: shape={labels.shape}, device={labels.device}")
+        print(f"  labels sample: {labels.cpu().flatten()[:10].tolist()}")
+        
         # Forward pass
         with torch.no_grad():
             loss, _ = model(input_ids, labels)

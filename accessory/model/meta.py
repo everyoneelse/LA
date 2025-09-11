@@ -15,6 +15,27 @@ from accessory.util import misc, tensor_parallel
 from accessory.util.tensor_type import default_tensor_type
 import torch.distributed as dist
 
+def safe_tensor_debug(tensor, name="tensor", max_elements=10):
+    """Safely print tensor info without causing CUDA sync issues in debugger"""
+    try:
+        if tensor is None:
+            print(f"DEBUG {name}: None")
+            return
+        
+        print(f"DEBUG {name}: shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}")
+        
+        # Only print values if tensor is small or we're not in distributed mode
+        if tensor.numel() <= max_elements or not (torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1):
+            if tensor.is_cuda:
+                values = tensor.cpu().flatten()[:max_elements].tolist()
+            else:
+                values = tensor.flatten()[:max_elements].tolist()
+            print(f"DEBUG {name} values: {values}")
+        else:
+            print(f"DEBUG {name}: skipping values (distributed mode or large tensor)")
+    except Exception as e:
+        print(f"DEBUG {name}: error accessing tensor - {e}")
+
 
 class MetaModel(nn.Module):
     def __init__(
@@ -225,6 +246,10 @@ class MetaModel(nn.Module):
 
     def forward(self, examples, labels, images=None):
         with torch.no_grad():
+            # Debug: safely print tensor info without hanging in debugger
+            safe_tensor_debug(labels, "labels_input")
+            safe_tensor_debug(examples, "examples_input")
+            
             non_zero_ = torch.count_nonzero(labels, dim=0)
             pos = non_zero_.shape[0] - 1
             while pos >= 0:
