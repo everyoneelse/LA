@@ -54,7 +54,7 @@ def load_hellaswag_data(data_dir: str, max_samples: Optional[int] = None) -> Lis
 def calculate_perplexity_batch_safe(model, texts: List[str], device: str = 'cuda', max_length: int = 512) -> List[float]:
     """
     Safe perplexity calculation for distributed/model parallel environments.
-    Falls back to individual processing to avoid synchronization issues.
+    Uses batch processing that's compatible with FSDP.
     """
     # Check if we're in distributed mode
     try:
@@ -68,11 +68,8 @@ def calculate_perplexity_batch_safe(model, texts: List[str], device: str = 'cuda
         is_distributed = False
         rank = 0
     
-    # In distributed mode, use simple individual processing to avoid deadlocks
-    if is_distributed:
-        return calculate_perplexity_individual(model, texts, device, max_length)
-    else:
-        return calculate_perplexity_batch(model, texts, device, max_length)
+    # Always use the fixed batch processing for FSDP compatibility
+    return calculate_perplexity_batch(model, texts, device, max_length)
 
 
 def calculate_perplexity_individual(model, texts: List[str], device: str = 'cuda', max_length: int = 512) -> List[float]:
@@ -215,38 +212,41 @@ def calculate_perplexity_batch(model, texts: List[str], device: str = 'cuda', ma
             else:
                 padded = False
             
-            # Process samples individually but with distributed coordination
-            per_sample_losses = []
-            total_samples = batch_input_ids.size(0)
-            
+            # Process entire batch at once for FSDP compatibility
             if is_distributed:
-                print(f"[RANK {rank}] Processing {total_samples} samples...")
+                print(f"[RANK {rank}] Processing batch of {batch_input_ids.size(0)} samples...")
             
-            for i in range(total_samples):
-                try:
-                    single_input = batch_input_ids[i:i+1]  # [1, seq_len]
-                    single_labels = batch_labels[i:i+1]    # [1, seq_len]
+            with autocast_ctx:
+                # CRITICAL FOR FSDP: Process the entire batch at once
+                # All ranks must execute the same forward pass synchronously
+                
+                # Get logits from the model for the entire batch
+                # We need to calculate per-sample perplexity manually
+                with torch.no_grad():
+                    # Forward pass to get loss - this is what FSDP expects
+                    batch_loss, logits = model(batch_input_ids, batch_labels)
                     
-                    with autocast_ctx:
-                        # Use the model's forward method which handles model parallel correctly
-                        single_loss, _ = model(single_input, single_labels)
-                        single_ppl = torch.exp(single_loss).item()
-                        per_sample_losses.append(single_ppl)
-                    
-                    # Periodic sync to keep processes aligned (every 10 samples)
-                    if is_distributed and (i + 1) % 10 == 0:
-                        try:
-                            # Use a timeout barrier to avoid infinite hanging
-                            dist.barrier()
-                            if rank == 0:
-                                print(f"Synced at sample {i+1}/{total_samples}")
-                        except Exception as sync_e:
-                            print(f"[RANK {rank}] Sync warning at sample {i+1}: {sync_e}")
-                            
-                except Exception as sample_e:
-                    print(f"[RANK {rank}] Error processing sample {i}: {sample_e}")
-                    per_sample_losses.append(float('inf'))
-                    continue
+                    # Calculate per-sample perplexity from logits if available
+                    if logits is not None:
+                        # Shift logits and labels for next-token prediction
+                        shift_logits = logits[..., :-1, :].contiguous()
+                        shift_labels = batch_labels[..., 1:].contiguous()
+                        
+                        # Calculate cross-entropy loss per sample
+                        loss_fct = torch.nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
+                        token_losses = loss_fct(
+                            shift_logits.view(-1, shift_logits.size(-1)),
+                            shift_labels.view(-1)
+                        ).view(batch_labels.size(0), -1)
+                        
+                        # Average over valid tokens for each sample
+                        valid_tokens = (shift_labels != -100).sum(dim=1)
+                        sample_losses = token_losses.sum(dim=1) / valid_tokens.clamp(min=1)
+                        per_sample_losses = [torch.exp(loss).item() for loss in sample_losses]
+                    else:
+                        # Fallback: use batch loss for all samples
+                        avg_ppl = torch.exp(batch_loss).item()
+                        per_sample_losses = [avg_ppl] * batch_input_ids.size(0)
             
             # Remove padded results if any
             if padded:
