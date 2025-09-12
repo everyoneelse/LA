@@ -128,6 +128,8 @@ def calculate_perplexity_batch(model, texts: List[str], device: str = 'cuda', ma
     embedding weight distribution issues.
     """
     try:
+        per_sample_losses: List[float] = []
+
         if not texts:
             return []
         
@@ -195,11 +197,11 @@ def calculate_perplexity_batch(model, texts: List[str], device: str = 'cuda', ma
             
             # Set up autocast context based on model dtype
             if model_dtype == torch.bfloat16:
-                autocast_ctx = torch.cuda.amp.autocast(dtype=torch.bfloat16)
+                autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
             elif model_dtype == torch.float16:
-                autocast_ctx = torch.cuda.amp.autocast(dtype=torch.float16)
+                autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.float16)
             else:
-                autocast_ctx = torch.cuda.amp.autocast(dtype=torch.float32)
+                autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.float32)
             
             # For distributed safety: ensure all processes handle the same number of samples
             # Pad the batch to be divisible by world_size if needed
@@ -216,7 +218,6 @@ def calculate_perplexity_batch(model, texts: List[str], device: str = 'cuda', ma
                 padded = False
             
             # Process samples individually but with distributed coordination
-            per_sample_losses = []
             total_samples = batch_input_ids.size(0)
             
             if is_distributed:
@@ -371,6 +372,13 @@ def run_hellaswag_evaluation(model, data_dir: str, batch_size: int = 4,
     Returns:
         Dictionary containing evaluation metrics
     """
+    # Unwrap model to avoid DDP/FSDP collectives when only rank-0 evaluates
+    model = unwrap_model(model)
+
+    # DEBUG: print once what type we are running
+    if os.getenv("LOCAL_RANK", "0") == "0":
+        print(f"[HellaSwag Eval] using model type {type(model)} (unwrapped)")
+
     # Load data
     data = load_hellaswag_data(data_dir, max_samples)
     
@@ -445,3 +453,25 @@ def print_hellaswag_results(metrics: Dict[str, float], iteration: int):
     print(f"[HellaSwag Eval - Iter {iteration}] "
           f"Accuracy: {metrics['accuracy']:.4f} "
           f"({metrics['correct_samples']}/{metrics['total_samples']})")
+
+# === Helper to recursively unwrap common distributed wrappers (DDP, FSDP, etc.) ===
+def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
+    """Recursively strip .module until we reach the underlying real model.
+
+    Works for torch.nn.parallel.DistributedDataParallel, torch.distributed.fsdp.FullyShardedDataParallel,
+    fairscale's FullyShardedDataParallel, etc., as long as they expose a ``.module`` attribute.
+    """
+    depth = 0
+    while hasattr(model, "module"):
+        try:
+            inner = model.module  # type: ignore[attr-defined]
+        except Exception:
+            break
+        # Safety: avoid infinite loop in case .module is self
+        if inner is model:
+            break
+        model = inner
+        depth += 1
+        if depth > 5:  # paranoid guard
+            break
+    return model
