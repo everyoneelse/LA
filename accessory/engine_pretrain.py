@@ -12,6 +12,7 @@ from accessory.util.hellaswag_eval import run_hellaswag_evaluation, print_hellas
 from accessory.util.hellaswag_eval_fsdp import run_hellaswag_evaluation_fsdp
 from accessory.util.hellaswag_eval_proper import run_hellaswag_evaluation_fsdp_proper
 from accessory.util.hellaswag_eval_debug_shapes import run_hellaswag_evaluation_debug_shapes
+from accessory.util.hellaswag_eval_fixed import run_hellaswag_evaluation_fsdp_fixed
 
 from fairscale.nn.model_parallel import initialize as fs_init
 
@@ -338,8 +339,8 @@ def train_one_epoch(model: torch.nn.Module,
                                 device='cuda'
                             )
                         else:
-                            # Normal evaluation
-                            hellaswag_metrics = run_hellaswag_evaluation_fsdp_proper(
+                            # Use fixed version with better rank display
+                            hellaswag_metrics = run_hellaswag_evaluation_fsdp_fixed(
                                 model=model,
                                 data_dir=getattr(args, 'hellaswag_data_dir', 'data/hellaswag/'),
                                 tokenizer=getattr(model, 'tokenizer', None),

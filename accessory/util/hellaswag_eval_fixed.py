@@ -1,7 +1,8 @@
 """
-Proper FSDP-compatible HellaSwag evaluation using PyTorch DataLoader and DistributedSampler
+Fixed HellaSwag evaluation with proper rank display and FSDP compatibility
 """
 import os
+import sys
 import torch
 import torch.distributed as dist
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
@@ -11,21 +12,57 @@ from tqdm import tqdm
 import jsonlines
 
 
+def get_rank_info():
+    """Get rank information from various sources"""
+    rank_info = {}
+    
+    # Try distributed
+    if dist.is_initialized():
+        rank_info['dist_rank'] = dist.get_rank()
+        rank_info['world_size'] = dist.get_world_size()
+    else:
+        rank_info['dist_rank'] = 0
+        rank_info['world_size'] = 1
+    
+    # Try environment variables
+    rank_info['env_rank'] = int(os.environ.get('RANK', 0))
+    rank_info['local_rank'] = int(os.environ.get('LOCAL_RANK', 0))
+    rank_info['world_size_env'] = int(os.environ.get('WORLD_SIZE', 1))
+    
+    # Use the most reliable source
+    if dist.is_initialized():
+        rank = rank_info['dist_rank']
+        world_size = rank_info['world_size']
+    else:
+        rank = rank_info['env_rank']
+        world_size = rank_info['world_size_env']
+    
+    return rank, world_size, rank_info
+
+
+def safe_print(msg, rank=None, force_flush=True):
+    """Print with rank information, handling various logging systems"""
+    if rank is None:
+        rank, _, _ = get_rank_info()
+    
+    # Format message with rank
+    formatted_msg = f"[Rank {rank}] {msg}"
+    
+    # Print to stdout
+    print(formatted_msg, flush=force_flush)
+    
+    # Also print to stderr in case stdout is redirected
+    print(formatted_msg, file=sys.stderr, flush=force_flush)
+
+
 class HellaSwagDataset(Dataset):
-    """
-    Standard PyTorch Dataset for HellaSwag
-    """
+    """Standard PyTorch Dataset for HellaSwag"""
     def __init__(self, data_file: str, tokenizer, max_length: int = 512):
-        """
-        Args:
-            data_file: Path to hellaswag jsonl file
-            tokenizer: Tokenizer instance
-            max_length: Maximum sequence length
-        """
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.pad_id = getattr(tokenizer, 'pad_id', 0)
         
-        # Load data once per process
+        # Load data
         self.data = []
         if os.path.exists(data_file):
             with jsonlines.open(data_file) as reader:
@@ -33,18 +70,11 @@ class HellaSwagDataset(Dataset):
                     self.data.append(item)
         else:
             raise FileNotFoundError(f"Data file not found: {data_file}")
-        
-        # Pre-compute pad_id
-        self.pad_id = getattr(tokenizer, 'pad_id', 0)
     
     def __len__(self):
         return len(self.data)
     
     def __getitem__(self, idx):
-        """
-        Returns all endings for a single HellaSwag example
-        Each ending is tokenized but NOT padded (padding done in collate_fn)
-        """
         item = self.data[idx]
         ctx = item['ctx']
         endings = item['endings']
@@ -60,37 +90,34 @@ class HellaSwagDataset(Dataset):
             all_tokens.append(tokens)
         
         return {
-            'tokens': all_tokens,  # List of token lists
+            'tokens': all_tokens,
             'label': label,
             'num_endings': len(endings)
         }
 
 
-def collate_hellaswag_batch(batch, pad_id=0):
+def collate_hellaswag_fixed(batch, pad_id=0):
     """
-    Collate function that pads all sequences in the batch to the same length
-    This is CRITICAL for FSDP compatibility
+    Collate function ensuring all sequences have the same length
+    CRITICAL for FSDP compatibility
     """
-    # Flatten all endings from all examples
+    # Collect all tokens
     all_tokens = []
-    all_lengths = []
     metadata = []
     
     for item in batch:
         for tokens in item['tokens']:
             all_tokens.append(tokens)
-            all_lengths.append(len(tokens))
-        
         metadata.append({
             'label': item['label'],
             'num_endings': item['num_endings']
         })
     
-    # Find max length in this batch
     if len(all_tokens) == 0:
         return None, None, metadata
     
-    max_len = max(all_lengths)
+    # Find global max length
+    max_len = max(len(tokens) for tokens in all_tokens)
     
     # Pad all sequences to max_len
     padded_input_ids = []
@@ -101,14 +128,11 @@ def collate_hellaswag_batch(batch, pad_id=0):
         padded = tokens + [pad_id] * (max_len - len(tokens))
         padded_input_ids.append(padded)
         
-        # Create labels (for loss calculation)
+        # Create labels
         labels = padded.copy()
-        # Set padding positions to -100
         for i in range(len(tokens), max_len):
             labels[i] = -100
-        # Ignore BOS token
         labels[0] = -100
-        
         padded_labels.append(labels)
     
     # Convert to tensors
@@ -118,7 +142,7 @@ def collate_hellaswag_batch(batch, pad_id=0):
     return input_ids, labels, metadata
 
 
-def run_hellaswag_evaluation_proper(
+def run_hellaswag_evaluation_fixed(
     model,
     data_file: str,
     tokenizer=None,
@@ -129,35 +153,28 @@ def run_hellaswag_evaluation_proper(
     num_workers: int = 0
 ) -> Dict[str, float]:
     """
-    Proper HellaSwag evaluation using PyTorch DataLoader with DistributedSampler
-    
-    This implementation:
-    1. Uses standard PyTorch Dataset/DataLoader
-    2. Each rank only loads and processes its portion of data
-    3. Properly handles FSDP synchronization
-    4. Aggregates results across all ranks
+    Fixed HellaSwag evaluation with proper rank display and FSDP compatibility
     """
     
-    # Check if we're in distributed mode
+    # Get rank information
+    rank, world_size, rank_info = get_rank_info()
     is_distributed = dist.is_initialized()
-    if is_distributed:
-        rank = dist.get_rank()
-        world_size = dist.get_world_size()
-    else:
-        rank = 0
-        world_size = 1
+    
+    # Print debug information
+    safe_print(f"Starting HellaSwag evaluation", rank)
+    safe_print(f"Rank info: {rank_info}", rank)
+    safe_print(f"Distributed: {is_distributed}, World size: {world_size}", rank)
     
     # Get tokenizer
     if tokenizer is None:
         if hasattr(model, 'tokenizer'):
             tokenizer = model.tokenizer
         else:
-            raise ValueError("No tokenizer provided and model has no tokenizer attribute")
+            raise ValueError("No tokenizer available")
     
-    # Check if data file exists
+    # Check data file
     if not os.path.exists(data_file):
-        if rank == 0:
-            print(f"HellaSwag data not found at {data_file}")
+        safe_print(f"HellaSwag data not found at {data_file}", rank)
         return {'accuracy': 0.0, 'total_samples': 0, 'correct_samples': 0}
     
     # Create dataset
@@ -165,9 +182,10 @@ def run_hellaswag_evaluation_proper(
     
     # Limit samples if requested
     if max_samples is not None and max_samples < len(dataset):
-        # Create a subset
         indices = list(range(max_samples))
         dataset = torch.utils.data.Subset(dataset, indices)
+    
+    total_samples = len(dataset)
     
     # Create sampler for distributed training
     if is_distributed:
@@ -175,33 +193,31 @@ def run_hellaswag_evaluation_proper(
             dataset,
             num_replicas=world_size,
             rank=rank,
-            shuffle=False,  # Don't shuffle for evaluation
-            drop_last=False  # Include all samples
+            shuffle=False,
+            drop_last=False
         )
+        samples_per_rank = len(sampler)
     else:
         sampler = None
+        samples_per_rank = total_samples
     
     # Create DataLoader
-    # Each rank will automatically get different data thanks to DistributedSampler
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
         sampler=sampler,
         shuffle=False if sampler else False,
-        collate_fn=lambda b: collate_hellaswag_batch(b, tokenizer.pad_id),
+        collate_fn=lambda b: collate_hellaswag_fixed(b, tokenizer.pad_id),
         num_workers=num_workers,
         pin_memory=True,
         drop_last=False
     )
     
-    # Calculate samples info
-    total_samples = len(dataset)
-    samples_per_rank = total_samples // world_size if is_distributed else total_samples
-    
-    # Print info with rank
-    print(f"[Rank {rank}] Evaluating HellaSwag: {total_samples} total samples")
-    if is_distributed:
-        print(f"[Rank {rank}]   Each rank processes ~{samples_per_rank} samples")
+    # Print evaluation info
+    safe_print(f"Total samples: {total_samples}", rank)
+    safe_print(f"Samples for this rank: {samples_per_rank}", rank)
+    safe_print(f"Batch size: {batch_size}", rank)
+    safe_print(f"Number of batches: {len(dataloader)}", rank)
     
     # Set model to eval mode
     model.eval()
@@ -210,7 +226,7 @@ def run_hellaswag_evaluation_proper(
     all_predictions = []
     all_labels = []
     
-    # Get model dtype for autocast
+    # Get model dtype
     model_dtype = next(model.parameters()).dtype
     if model_dtype == torch.bfloat16:
         autocast_ctx = torch.cuda.amp.autocast(dtype=torch.bfloat16)
@@ -220,59 +236,54 @@ def run_hellaswag_evaluation_proper(
         autocast_ctx = torch.cuda.amp.autocast(enabled=False)
     
     with torch.no_grad():
-        for batch_idx, (input_ids, labels, metadata) in enumerate(tqdm(
-            dataloader,
-            desc=f"HellaSwag Eval [Rank {rank}]",
-            disable=(rank != 0)
-        )):
-            if input_ids is None:  # Empty batch
+        for batch_idx, (input_ids, labels, metadata) in enumerate(dataloader):
+            if input_ids is None:
                 continue
+            
+            # Debug first batch
+            if batch_idx == 0:
+                safe_print(f"First batch shape: input_ids={input_ids.shape}, labels={labels.shape}", rank)
             
             # Move to device
             input_ids = input_ids.to(device)
             labels = labels.to(device)
             
             with autocast_ctx:
-                # CRITICAL: Single forward pass for entire batch (FSDP requirement)
-                batch_loss, logits = model(input_ids, labels)
+                # Forward pass - CRITICAL: all ranks must execute this
+                outputs = model(input_ids, labels)
                 
-                if logits is not None:
-                    # Calculate per-sample perplexity from logits
-                    shift_logits = logits[..., :-1, :].contiguous()
-                    shift_labels = labels[..., 1:].contiguous()
-                    
-                    # Calculate loss per token
-                    loss_fct = torch.nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
-                    token_losses = loss_fct(
-                        shift_logits.view(-1, shift_logits.size(-1)),
-                        shift_labels.view(-1)
-                    ).view(labels.size(0), -1)
-                    
-                    # Average over valid tokens for each sample
-                    valid_tokens = (shift_labels != -100).sum(dim=1)
-                    sample_losses = token_losses.sum(dim=1) / valid_tokens.clamp(min=1)
-                    perplexities = torch.exp(sample_losses)
+                if isinstance(outputs, tuple):
+                    loss = outputs[0]
                 else:
-                    # Fallback: use batch loss
-                    avg_ppl = torch.exp(batch_loss)
-                    perplexities = torch.full((input_ids.size(0),), avg_ppl.item(), device=device)
+                    loss = outputs
+                
+                # Calculate perplexities
+                if loss.dim() == 0:
+                    # Scalar loss
+                    avg_ppl = torch.exp(loss).item()
+                    perplexities = [avg_ppl] * input_ids.size(0)
+                else:
+                    # Per-sample losses
+                    perplexities = [torch.exp(l).item() for l in loss]
             
-            # Process predictions for each example in the batch
+            # Process predictions
             ppl_idx = 0
             for meta in metadata:
                 num_endings = meta['num_endings']
                 label = meta['label']
                 
-                # Get perplexities for this example's endings
-                ending_ppls = perplexities[ppl_idx:ppl_idx + num_endings].cpu().numpy()
+                ending_ppls = perplexities[ppl_idx:ppl_idx + num_endings]
                 ppl_idx += num_endings
                 
-                # Predict the ending with lowest perplexity
                 predicted = int(np.argmin(ending_ppls))
                 all_predictions.append(predicted)
                 
                 if label >= 0:
                     all_labels.append(label)
+            
+            # Progress update
+            if batch_idx % 10 == 0:
+                safe_print(f"Processed {batch_idx+1}/{len(dataloader)} batches", rank)
     
     # Calculate local metrics
     if len(all_labels) > 0:
@@ -282,21 +293,20 @@ def run_hellaswag_evaluation_proper(
         correct = 0
         total = 0
     
-    # Debug: Print local stats
-    if is_distributed:
-        print(f"[Rank {rank}] Local: {correct}/{total} correct")
+    safe_print(f"Local results: {correct}/{total} correct", rank)
     
-    # Aggregate results across all ranks
+    # Aggregate across ranks
     if is_distributed:
         correct_tensor = torch.tensor([correct], dtype=torch.long, device=device)
         total_tensor = torch.tensor([total], dtype=torch.long, device=device)
         
-        # Sum across all ranks
         dist.all_reduce(correct_tensor, op=dist.ReduceOp.SUM)
         dist.all_reduce(total_tensor, op=dist.ReduceOp.SUM)
         
         correct = correct_tensor.item()
         total = total_tensor.item()
+        
+        safe_print(f"Global results after aggregation: {correct}/{total}", rank)
     
     # Calculate final metrics
     accuracy = correct / total if total > 0 else 0.0
@@ -307,16 +317,14 @@ def run_hellaswag_evaluation_proper(
         'total_samples': total
     }
     
-    # Only rank 0 prints final results
     if rank == 0:
-        print(f"HellaSwag Final Results:")
-        print(f"  Accuracy: {accuracy:.4f} ({correct}/{total})")
+        safe_print(f"Final HellaSwag Accuracy: {accuracy:.4f} ({correct}/{total})", rank)
     
     return metrics
 
 
-# Convenience function that matches the original interface
-def run_hellaswag_evaluation_fsdp_proper(
+# Wrapper function matching original interface
+def run_hellaswag_evaluation_fsdp_fixed(
     model,
     data_dir: str,
     tokenizer=None,
@@ -325,12 +333,9 @@ def run_hellaswag_evaluation_fsdp_proper(
     max_length: int = 512,
     device: str = 'cuda'
 ) -> Dict[str, float]:
-    """
-    Wrapper that matches the original interface but uses proper DataLoader
-    """
+    """Wrapper matching original interface"""
     data_file = os.path.join(data_dir, 'hellaswag_val.jsonl')
-    
-    return run_hellaswag_evaluation_proper(
+    return run_hellaswag_evaluation_fixed(
         model=model,
         data_file=data_file,
         tokenizer=tokenizer,
@@ -338,5 +343,5 @@ def run_hellaswag_evaluation_fsdp_proper(
         max_samples=max_samples,
         max_length=max_length,
         device=device,
-        num_workers=0  # Avoid multiprocessing issues
+        num_workers=0
     )
