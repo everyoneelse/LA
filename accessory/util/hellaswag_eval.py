@@ -68,8 +68,8 @@ def calculate_perplexity_batch_safe(model, texts: List[str], device: str = 'cuda
         is_distributed = False
         rank = 0
     
-    # Always use batch processing for consistency with FSDP
-    return calculate_perplexity_batch_fsdp_safe(model, texts, device, max_length)
+    # Always use the fixed batch processing for FSDP compatibility
+    return calculate_perplexity_batch(model, texts, device, max_length)
 
 
 def calculate_perplexity_individual(model, texts: List[str], device: str = 'cuda', max_length: int = 512) -> List[float]:
@@ -217,20 +217,36 @@ def calculate_perplexity_batch(model, texts: List[str], device: str = 'cuda', ma
                 print(f"[RANK {rank}] Processing batch of {batch_input_ids.size(0)} samples...")
             
             with autocast_ctx:
-                # Process the entire batch at once - this is critical for FSDP
-                # FSDP requires all ranks to execute the same forward pass
-                batch_loss, _ = model(batch_input_ids, batch_labels)
+                # CRITICAL FOR FSDP: Process the entire batch at once
+                # All ranks must execute the same forward pass synchronously
                 
-                # Calculate per-sample losses from the batch loss
-                # Note: This gives an average loss for the batch, not individual losses
-                # For more accurate per-sample losses, we'd need to modify the model's forward method
-                if batch_loss.dim() > 0:
-                    # If model returns per-sample losses
-                    per_sample_losses = [torch.exp(loss).item() for loss in batch_loss]
-                else:
-                    # If model returns averaged loss, use it for all samples
-                    avg_ppl = torch.exp(batch_loss).item()
-                    per_sample_losses = [avg_ppl] * batch_input_ids.size(0)
+                # Get logits from the model for the entire batch
+                # We need to calculate per-sample perplexity manually
+                with torch.no_grad():
+                    # Forward pass to get loss - this is what FSDP expects
+                    batch_loss, logits = model(batch_input_ids, batch_labels)
+                    
+                    # Calculate per-sample perplexity from logits if available
+                    if logits is not None:
+                        # Shift logits and labels for next-token prediction
+                        shift_logits = logits[..., :-1, :].contiguous()
+                        shift_labels = batch_labels[..., 1:].contiguous()
+                        
+                        # Calculate cross-entropy loss per sample
+                        loss_fct = torch.nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
+                        token_losses = loss_fct(
+                            shift_logits.view(-1, shift_logits.size(-1)),
+                            shift_labels.view(-1)
+                        ).view(batch_labels.size(0), -1)
+                        
+                        # Average over valid tokens for each sample
+                        valid_tokens = (shift_labels != -100).sum(dim=1)
+                        sample_losses = token_losses.sum(dim=1) / valid_tokens.clamp(min=1)
+                        per_sample_losses = [torch.exp(loss).item() for loss in sample_losses]
+                    else:
+                        # Fallback: use batch loss for all samples
+                        avg_ppl = torch.exp(batch_loss).item()
+                        per_sample_losses = [avg_ppl] * batch_input_ids.size(0)
             
             # Remove padded results if any
             if padded:
