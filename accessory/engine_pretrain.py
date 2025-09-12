@@ -10,6 +10,7 @@ import accessory.util.lr_sched as lr_sched
 from accessory.util.flop_counter import FLOPCounter, TokenCounter, get_model_config_from_model
 from accessory.util.hellaswag_eval import run_hellaswag_evaluation, print_hellaswag_results, save_hellaswag_results
 from accessory.util.hellaswag_eval_fsdp import run_hellaswag_evaluation_fsdp
+from accessory.util.hellaswag_eval_proper import run_hellaswag_evaluation_fsdp_proper
 
 from fairscale.nn.model_parallel import initialize as fs_init
 
@@ -171,7 +172,8 @@ def _async_validator_worker(args_namespace):
                 if getattr(args, 'hellaswag_eval', False):
                     try:
                         # In async mode, we're running on a single process, so no distributed issues
-                        hellaswag_metrics = run_hellaswag_evaluation_fsdp(
+                        # But still use the proper version for consistency
+                        hellaswag_metrics = run_hellaswag_evaluation_fsdp_proper(
                             model=eval_model,
                             data_dir=getattr(args, 'hellaswag_data_dir', 'data/hellaswag/'),
                             tokenizer=getattr(eval_model, 'tokenizer', None),
@@ -322,9 +324,9 @@ def train_one_epoch(model: torch.nn.Module,
                 # HellaSwag evaluation (FSDP-compatible version)
                 if getattr(args, 'hellaswag_eval', False):
                     try:
-                        # Use FSDP-compatible evaluation that handles distributed properly
-                        # Note: This runs on all ranks, not just main process
-                        hellaswag_metrics = run_hellaswag_evaluation_fsdp(
+                        # Use proper FSDP-compatible evaluation with DistributedSampler
+                        # Each rank processes different data automatically
+                        hellaswag_metrics = run_hellaswag_evaluation_fsdp_proper(
                             model=model,
                             data_dir=getattr(args, 'hellaswag_data_dir', 'data/hellaswag/'),
                             tokenizer=getattr(model, 'tokenizer', None),  # Pass tokenizer if available
