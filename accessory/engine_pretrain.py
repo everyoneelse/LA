@@ -9,6 +9,7 @@ import accessory.util.misc as misc
 import accessory.util.lr_sched as lr_sched
 from accessory.util.flop_counter import FLOPCounter, TokenCounter, get_model_config_from_model
 from accessory.util.hellaswag_eval import run_hellaswag_evaluation, print_hellaswag_results, save_hellaswag_results
+from accessory.util.hellaswag_eval_fsdp import run_hellaswag_evaluation_fsdp
 
 from fairscale.nn.model_parallel import initialize as fs_init
 
@@ -166,14 +167,17 @@ def _async_validator_worker(args_namespace):
             if metrics is not None:
                 print(f"[AsyncValidator/Child] {os.path.basename(latest)} metrics: {metrics}")
                 
-                # HellaSwag evaluation in async mode
+                # HellaSwag evaluation in async mode (using FSDP-compatible version)
                 if getattr(args, 'hellaswag_eval', False):
                     try:
-                        hellaswag_metrics = run_hellaswag_evaluation(
+                        # In async mode, we're running on a single process, so no distributed issues
+                        hellaswag_metrics = run_hellaswag_evaluation_fsdp(
                             model=eval_model,
                             data_dir=getattr(args, 'hellaswag_data_dir', 'data/hellaswag/'),
+                            tokenizer=getattr(eval_model, 'tokenizer', None),
                             batch_size=getattr(args, 'hellaswag_batch_size', 4),
                             max_samples=getattr(args, 'hellaswag_max_samples', None),
+                            max_length=getattr(args, 'max_words', 512),
                             device=args.val_device if args.val_device is not None else 'cuda'
                         )
                         print(f"[AsyncValidator/Child] HellaSwag metrics: {hellaswag_metrics}")
@@ -315,24 +319,32 @@ def train_one_epoch(model: torch.nn.Module,
                     for metric_name, metric_value in val_metrics.items():
                         log_writer.add_scalar("val/" + metric_name, metric_value, data_iter_step)
                 
-                # HellaSwag evaluation
-                if getattr(args, 'hellaswag_eval', False) and misc.is_main_process():
+                # HellaSwag evaluation (FSDP-compatible version)
+                if getattr(args, 'hellaswag_eval', False):
                     try:
-                        hellaswag_metrics = run_hellaswag_evaluation(
+                        # Use FSDP-compatible evaluation that handles distributed properly
+                        # Note: This runs on all ranks, not just main process
+                        hellaswag_metrics = run_hellaswag_evaluation_fsdp(
                             model=model,
                             data_dir=getattr(args, 'hellaswag_data_dir', 'data/hellaswag/'),
+                            tokenizer=getattr(model, 'tokenizer', None),  # Pass tokenizer if available
                             batch_size=getattr(args, 'hellaswag_batch_size', 4),
                             max_samples=getattr(args, 'hellaswag_max_samples', None),
+                            max_length=getattr(args, 'max_words', 512),
                             device='cuda'
                         )
-                        print_hellaswag_results(hellaswag_metrics, data_iter_step + 1)
-                        save_hellaswag_results(hellaswag_metrics, args.output_dir, data_iter_step + 1)
                         
-                        if log_writer is not None:
-                            for metric_name, metric_value in hellaswag_metrics.items():
-                                log_writer.add_scalar("hellaswag/" + metric_name, metric_value, data_iter_step)
+                        # Only main process saves and logs results
+                        if misc.is_main_process():
+                            print_hellaswag_results(hellaswag_metrics, data_iter_step + 1)
+                            save_hellaswag_results(hellaswag_metrics, args.output_dir, data_iter_step + 1)
+                            
+                            if log_writer is not None:
+                                for metric_name, metric_value in hellaswag_metrics.items():
+                                    log_writer.add_scalar("hellaswag/" + metric_name, metric_value, data_iter_step)
                     except Exception as e:
-                        print(f"Warning: HellaSwag evaluation failed: {e}")
+                        if misc.is_main_process():
+                            print(f"Warning: HellaSwag evaluation failed: {e}")
                 
                 model.train(True)
         else:
