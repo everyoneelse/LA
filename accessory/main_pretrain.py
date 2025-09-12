@@ -136,6 +136,8 @@ def get_args_parser():
                         help='directory containing HellaSwag data')
     parser.add_argument('--hellaswag_batch_size', type=int, default=4,
                         help='batch size for HellaSwag evaluation')
+    parser.add_argument('--hellaswag_debug', action='store_true', default=False,
+                        help='enable debug mode for HellaSwag with detailed shape information')
     parser.add_argument('--hellaswag_max_samples', type=int, default=None,
                         help='maximum number of HellaSwag samples to evaluate (None for all)')
 
