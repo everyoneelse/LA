@@ -319,7 +319,7 @@ def train_one_epoch(model: torch.nn.Module,
                 if getattr(args, 'hellaswag_eval', False) and misc.is_main_process():
                     try:
                         hellaswag_metrics = run_hellaswag_evaluation(
-                            model=model,
+                            model=unwrap_model(model),
                             data_dir=getattr(args, 'hellaswag_data_dir', 'data/hellaswag/'),
                             batch_size=getattr(args, 'hellaswag_batch_size', 4),
                             max_samples=getattr(args, 'hellaswag_max_samples', None),
