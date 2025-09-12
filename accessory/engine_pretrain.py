@@ -8,7 +8,7 @@ import torch
 import accessory.util.misc as misc
 import accessory.util.lr_sched as lr_sched
 from accessory.util.flop_counter import FLOPCounter, TokenCounter, get_model_config_from_model
-from accessory.util.hellaswag_eval import run_hellaswag_evaluation, print_hellaswag_results, save_hellaswag_results
+from accessory.util.hellaswag_eval import run_hellaswag_evaluation, print_hellaswag_results, save_hellaswag_results, unwrap_model
 
 from fairscale.nn.model_parallel import initialize as fs_init
 
@@ -249,8 +249,8 @@ def train_one_epoch(model: torch.nn.Module,
         total_flops += batch_flops
 
         autocast_ctx = {
-            "bf16": torch.cuda.amp.autocast(dtype=torch.bfloat16),
-            "fp16": torch.cuda.amp.autocast(dtype=torch.float16),
+            "bf16": torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16),
+            "fp16": torch.amp.autocast(device_type="cuda", dtype=torch.float16),
             "tf32": contextlib.nullcontext(),
         }[args.precision]
         with autocast_ctx:
@@ -400,8 +400,8 @@ def val_one_epoch(model: torch.nn.Module,
 
     for data_iter_step, (examples, labels) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         autocast_ctx = {
-            "bf16": torch.cuda.amp.autocast(dtype=torch.bfloat16),
-            "fp16": torch.cuda.amp.autocast(dtype=torch.float16),
+            "bf16": torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16),
+            "fp16": torch.amp.autocast(device_type="cuda", dtype=torch.float16),
             "tf32": contextlib.nullcontext(),
         }[args.precision]
         with autocast_ctx:
@@ -428,8 +428,8 @@ def val_one_epoch_local(model: torch.nn.Module,
         if max_batches is not None and data_iter_step >= max_batches:
             break
         autocast_ctx = {
-            "bf16": torch.cuda.amp.autocast(dtype=torch.bfloat16),
-            "fp16": torch.cuda.amp.autocast(dtype=torch.float16),
+            "bf16": torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16),
+            "fp16": torch.amp.autocast(device_type="cuda", dtype=torch.float16),
             "tf32": contextlib.nullcontext(),
         }[args.precision]
         with autocast_ctx:
