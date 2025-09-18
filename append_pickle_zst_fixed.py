@@ -21,9 +21,9 @@ def open_writer(path):
 
 write_obj, f_out = open_writer(PATH)
 
-# ---------- 模拟 5 段进行测试 ----------
-for i in range(5):
-    chunk = list(range(i*10, (i+1)*10))  # 每段 10 个数字（用于测试）
+# ---------- 模拟 100 段 ----------
+for i in range(100):
+    chunk = list(range(i*1_000_000, (i+1)*1_000_000))  # 每段 100 万数字
     write_obj(chunk)
     print(f'段 {i} 写入完成')
 
