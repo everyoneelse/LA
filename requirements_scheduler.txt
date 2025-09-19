@@ -1,0 +1,13 @@
+# GPU Scheduler Requirements
+# GPU调度器所需的Python包
+
+psutil>=5.8.0
+# 用于进程管理和系统监控
+
+# 注意：以下包可能已经在您的环境中安装
+# torch>=1.9.0
+# numpy>=1.20.0
+
+# 可选包（用于增强功能）
+# requests>=2.25.0  # 用于HTTP通知（如果需要）
+# schedule>=1.1.0   # 用于更复杂的调度（如果需要）

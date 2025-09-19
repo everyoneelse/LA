@@ -1,0 +1,57 @@
+{
+  "time_schedules": {
+    "day_shift": {
+      "start_time": "08:00",
+      "end_time": "18:00",
+      "allowed_gpus": [
+        0,
+        3
+      ],
+      "description": "Day shift: 8 AM - 6 PM, GPUs 0,3 only"
+    },
+    "night_shift": {
+      "start_time": "18:00",
+      "end_time": "08:00",
+      "allowed_gpus": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "description": "Night shift: 6 PM - 8 AM, All GPUs"
+    }
+  },
+  "pretraining": {
+    "script_path": "/workspace/accessory/main_pretrain.py",
+    "base_args": [
+      "--batch_size",
+      "4",
+      "--accum_iter",
+      "4",
+      "--lr",
+      "0.001",
+      "--max_words",
+      "2048",
+      "--output_dir",
+      "./output_scheduled",
+      "--save_freq",
+      "5000",
+      "--val_freq",
+      "10000"
+    ],
+    "required_args": {
+      "llama_config": "/workspace/accessory/configs/model/finetune/sg/llamaPeft_normBias.py",
+      "tokenizer_path": "/workspace/tokenizer.model",
+      "data_meta_path": "/workspace/data_example/PretrainMeta.json",
+      "data_root": "/workspace/data_example"
+    },
+    "checkpoint_dir": "./checkpoints_scheduled",
+    "resume_from_checkpoint": true
+  },
+  "monitoring": {
+    "check_interval": 30,
+    "grace_period": 10,
+    "max_restart_attempts": 3,
+    "log_level": "INFO"
+  }
+}
