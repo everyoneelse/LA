@@ -8,11 +8,12 @@ import accessory.util.misc as misc
 import accessory.util.lr_sched as lr_sched
 
 from fairscale.nn.model_parallel import initialize as fs_init
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 
 def test_prompts_during_training(model, prompts, args, step, epoch):
     """
-    Test prompts during training and print results
+    Test prompts during training and print results - safe version for FSDP models
     """
     if not prompts or len(prompts) == 0:
         return
@@ -28,35 +29,72 @@ def test_prompts_during_training(model, prompts, args, step, epoch):
     print(f"PROMPT TEST - Epoch: {epoch}, Step: {step}")
     print(f"{'='*60}")
     
-    model.eval()
-    with torch.no_grad():
-        try:
+    # Save original training state
+    was_training = model.training
+    
+    try:
+        model.eval()
+        
+        with torch.no_grad():
             # Use the same autocast context as training
             autocast_ctx = {
-                "bf16": torch.cuda.amp.autocast(dtype=torch.bfloat16),
-                "fp16": torch.cuda.amp.autocast(dtype=torch.float16),
+                "bf16": torch.amp.autocast('cuda', dtype=torch.bfloat16),
+                "fp16": torch.amp.autocast('cuda', dtype=torch.float16),
                 "tf32": contextlib.nullcontext(),
             }[args.precision]
             
-            with autocast_ctx:
-                results = model.generate(
-                    prompts, 
-                    None,  # image
-                    max_gen_len=args.test_prompt_max_gen_len, 
-                    temperature=args.test_prompt_temperature, 
-                    top_p=args.test_prompt_top_p
-                )
-            
-            for i, (prompt, result) in enumerate(zip(prompts, results)):
-                print(f"\nPrompt {i+1}: {prompt}")
-                print(f"Response: {result}")
-                print("-" * 40)
+            # Handle different model types
+            if isinstance(model, FSDP):
+                # For FSDP models, we need special handling
+                print("Detected FSDP model - using safe inference mode")
                 
-        except Exception as e:
-            print(f"Error during prompt testing: {e}")
-    
-    model.train()
-    print(f"{'='*60}\n")
+                # Try to gather full parameters for inference
+                with FSDP.summon_full_params(model, writeback=False, recurse=True):
+                    try:
+                        with autocast_ctx:
+                            results = model.generate(
+                                prompts, 
+                                None,  # image
+                                max_gen_len=args.test_prompt_max_gen_len, 
+                                temperature=args.test_prompt_temperature, 
+                                top_p=args.test_prompt_top_p
+                            )
+                        
+                        for i, (prompt, result) in enumerate(zip(prompts, results)):
+                            print(f"\nPrompt {i+1}: {prompt}")
+                            print(f"Response: {result}")
+                            print("-" * 40)
+                            
+                    except Exception as inner_e:
+                        print(f"FSDP inference failed: {inner_e}")
+                        print("This is normal for some FSDP configurations during training.")
+                        print("Prompts will be tested again at the next interval.")
+                        
+            else:
+                # For regular models
+                with autocast_ctx:
+                    results = model.generate(
+                        prompts, 
+                        None,  # image
+                        max_gen_len=args.test_prompt_max_gen_len, 
+                        temperature=args.test_prompt_temperature, 
+                        top_p=args.test_prompt_top_p
+                    )
+                
+                for i, (prompt, result) in enumerate(zip(prompts, results)):
+                    print(f"\nPrompt {i+1}: {prompt}")
+                    print(f"Response: {result}")
+                    print("-" * 40)
+                    
+    except Exception as e:
+        print(f"Prompt testing error: {e}")
+        print("Training continues normally. Consider adjusting prompt test settings if this persists.")
+        
+    finally:
+        # Always restore training state
+        if was_training:
+            model.train()
+        print(f"{'='*60}\n")
 
 
 def train_one_epoch(model: torch.nn.Module,
@@ -87,8 +125,8 @@ def train_one_epoch(model: torch.nn.Module,
             lr_sched.adjust_learning_rate_epoch(optimizer, data_iter_step / len(data_loader) + epoch, args)
 
         autocast_ctx = {
-            "bf16": torch.cuda.amp.autocast(dtype=torch.bfloat16),
-            "fp16": torch.cuda.amp.autocast(dtype=torch.float16),
+            "bf16": torch.amp.autocast('cuda', dtype=torch.bfloat16),
+            "fp16": torch.amp.autocast('cuda', dtype=torch.float16),
             "tf32": contextlib.nullcontext(),
         }[args.precision]
         with autocast_ctx:
