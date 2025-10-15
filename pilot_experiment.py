@@ -336,6 +336,10 @@ class PilotTrainer:
         logger.info("保存模型和结果...")
         trainer.save_model()
         
+        # 保存tokenizer
+        logger.info("保存tokenizer...")
+        self.processor.tokenizer.save_pretrained(self.config.output_dir)
+        
         # 8. 评估
         logger.info("评估模型...")
         eval_results = trainer.evaluate()
