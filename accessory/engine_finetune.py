@@ -14,7 +14,8 @@ def train_one_epoch(model: torch.nn.Module,
                     data_loader, optimizer: torch.optim.Optimizer,
                     epoch: int, start_iter: int, loss_scaler,
                     log_writer=None,
-                    args=None):
+                    args=None,
+                    max_steps=None):
     model.train(True)
     metric_logger = misc.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', misc.SmoothedValue(window_size=1, fmt='{value:.6f}'))
@@ -29,6 +30,10 @@ def train_one_epoch(model: torch.nn.Module,
         print('log_dir: {}'.format(log_writer.log_dir))
     for data_iter_step, batch_data in enumerate(
         metric_logger.log_every(data_loader, print_freq, header, start_iter), start=start_iter):
+        # Early stop for fractional epochs
+        if max_steps is not None and data_iter_step >= max_steps:
+            print(f"Stopping at step {data_iter_step}/{max_steps} for fractional epoch")
+            break
         if len(batch_data) == 4:
             examples, labels, example_mask, imgs = batch_data
         else:
