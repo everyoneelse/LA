@@ -10,6 +10,55 @@ import accessory.util.lr_sched as lr_sched
 from fairscale.nn.model_parallel import initialize as fs_init
 
 
+def test_prompts_during_training(model, prompts, args, step, epoch):
+    """
+    Test prompts during training and print results
+    """
+    if not prompts or len(prompts) == 0:
+        return
+    
+    if step % args.test_prompt_interval != 0:
+        return
+    
+    # Only run on main process to avoid duplicate outputs
+    if not misc.is_main_process():
+        return
+    
+    print(f"\n{'='*60}")
+    print(f"PROMPT TEST - Epoch: {epoch}, Step: {step}")
+    print(f"{'='*60}")
+    
+    model.eval()
+    with torch.no_grad():
+        try:
+            # Use the same autocast context as training
+            autocast_ctx = {
+                "bf16": torch.cuda.amp.autocast(dtype=torch.bfloat16),
+                "fp16": torch.cuda.amp.autocast(dtype=torch.float16),
+                "tf32": contextlib.nullcontext(),
+            }[args.precision]
+            
+            with autocast_ctx:
+                results = model.generate(
+                    prompts, 
+                    None,  # image
+                    max_gen_len=args.test_prompt_max_gen_len, 
+                    temperature=args.test_prompt_temperature, 
+                    top_p=args.test_prompt_top_p
+                )
+            
+            for i, (prompt, result) in enumerate(zip(prompts, results)):
+                print(f"\nPrompt {i+1}: {prompt}")
+                print(f"Response: {result}")
+                print("-" * 40)
+                
+        except Exception as e:
+            print(f"Error during prompt testing: {e}")
+    
+    model.train()
+    print(f"{'='*60}\n")
+
+
 def train_one_epoch(model: torch.nn.Module,
                     data_loader, optimizer: torch.optim.Optimizer,
                     epoch: int, start_iter: int, loss_scaler,
@@ -85,6 +134,11 @@ def train_one_epoch(model: torch.nn.Module,
             metric_value = misc.all_reduce_mean(metric_value, group=fs_init.get_data_parallel_group())
             if log_writer is not None:
                 log_writer.add_scalar(metric_name, metric_value, data_iter_step + len(data_loader) * epoch)
+
+        # test prompts during training
+        if update_grad and hasattr(args, 'test_prompts') and args.test_prompts:
+            test_prompts_during_training(model, args.test_prompts, args, 
+                                       (data_iter_step + 1) // accum_iter, epoch)
 
         # save within epoch
         n_update_per_save = args.save_iteration_interval // accum_iter
