@@ -86,7 +86,7 @@ def get_args_parser():
     parser.add_argument('--min_lr', type=float, default=0.0001, metavar='LR',
                         help='lower lr bound for cyclic schedulers that hit 0')
 
-    parser.add_argument('--epochs', default=400, type=int)
+    parser.add_argument('--epochs', default=400, type=float)
     parser.add_argument('--warmup_epochs', type=float, default=1.0, metavar='N',
                         help='epoch to warmup LR')
 
@@ -326,18 +326,46 @@ def main(args):
 
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
-    for epoch in range(start_epoch, args.epochs):
+    epoch = start_epoch
+    # Support fractional epochs
+    while epoch < args.epochs:
         if args.distributed:
-            data_loader_train.sampler.set_epoch(epoch, start_iter)
+            data_loader_train.sampler.set_epoch(int(epoch), start_iter)
+
+        # Calculate if this is a partial epoch
+        remaining_epochs = args.epochs - epoch
+        is_final_partial_epoch = remaining_epochs < 1.0
+        
+        if is_final_partial_epoch:
+            # For partial epoch, we need to stop early
+            # Calculate how many batches to run
+            total_batches = len(data_loader_train)
+            batches_to_run = int(total_batches * remaining_epochs)
+            print(f"Running partial epoch: {remaining_epochs:.2f} epochs ({batches_to_run}/{total_batches} batches)")
+            # Create a subset of the dataloader
+            from itertools import islice
+            partial_loader = islice(data_loader_train, batches_to_run)
+            # We need to wrap it to maintain the same interface
+            class PartialDataLoader:
+                def __init__(self, iterator, length):
+                    self.iterator = iterator
+                    self.length = length
+                def __iter__(self):
+                    return self.iterator
+                def __len__(self):
+                    return self.length
+            train_loader = PartialDataLoader(partial_loader, batches_to_run)
+        else:
+            train_loader = data_loader_train
 
         train_stats = train_one_epoch(
-            model, data_loader_train,
+            model, train_loader,
             optimizer, epoch, start_iter, loss_scaler,
             log_writer=log_writer,
             args=args
         )
 
-        if args.output_dir and (epoch % args.save_interval == 0 or epoch + 1 == args.epochs):
+        if args.output_dir and (int(epoch) % args.save_interval == 0 or epoch + 1 >= args.epochs):
             misc.save_checkpoint(
                 output_dir=args.output_dir,
                 args=args, epoch=epoch, iteration=None, model=model, optimizer=optimizer,
@@ -355,6 +383,7 @@ def main(args):
                 f.write(json.dumps(log_stats) + "\n")
 
         start_iter = 0
+        epoch += 1.0
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
