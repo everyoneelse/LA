@@ -9,11 +9,66 @@ import accessory.util.lr_sched as lr_sched
 
 from fairscale.nn.model_parallel import initialize as fs_init
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+import json
+import time
+
+
+def simple_prompt_logging(prompts, args, step, epoch):
+    """
+    Simple fallback: just log the prompts and training progress
+    This is useful when FSDP makes generation impossible during training
+    """
+    if not prompts or len(prompts) == 0:
+        return
+    
+    if step % args.test_prompt_interval != 0:
+        return
+    
+    # Only run on main process
+    if not misc.is_main_process():
+        return
+    
+    print(f"\n{'='*60}")
+    print(f"PROMPT CHECKPOINT - Epoch: {epoch}, Step: {step}")
+    print(f"{'='*60}")
+    
+    # Log training progress and prompts
+    print(f"Training Progress: Epoch {epoch}, Step {step}")
+    print(f"Scheduled prompts for testing:")
+    
+    for i, prompt in enumerate(prompts):
+        print(f"  {i+1}. {prompt}")
+    
+    print(f"\nNote: Actual generation will be performed after training completes.")
+    print(f"You can test these prompts manually using the inference demo.")
+    
+    # Optionally save to file for later testing
+    if hasattr(args, 'output_dir') and args.output_dir:
+        try:
+            prompt_log_file = f"{args.output_dir}/prompt_test_log.jsonl"
+            log_entry = {
+                "epoch": epoch,
+                "step": step,
+                "timestamp": time.time(),
+                "prompts": prompts,
+                "test_params": {
+                    "max_gen_len": args.test_prompt_max_gen_len,
+                    "temperature": args.test_prompt_temperature,
+                    "top_p": args.test_prompt_top_p
+                }
+            }
+            with open(prompt_log_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(log_entry) + "\n")
+            print(f"Prompts logged to: {prompt_log_file}")
+        except Exception as e:
+            print(f"Could not save prompt log: {e}")
+    
+    print(f"{'='*60}\n")
 
 
 def test_prompts_during_training(model, prompts, args, step, epoch):
     """
-    Test prompts during training and print results - safe version for FSDP models
+    Test prompts during training - with multiple fallback strategies for FSDP models
     """
     if not prompts or len(prompts) == 0:
         return
@@ -43,14 +98,29 @@ def test_prompts_during_training(model, prompts, args, step, epoch):
                 "tf32": contextlib.nullcontext(),
             }[args.precision]
             
-            # Handle different model types
-            if isinstance(model, FSDP):
-                # For FSDP models, we need special handling
-                print("Detected FSDP model - using safe inference mode")
-                
-                # Try to gather full parameters for inference
-                with FSDP.summon_full_params(model, writeback=False, recurse=True):
-                    try:
+            success = False
+            
+            # Strategy 1: Try direct generation (works for non-FSDP models)
+            if not success:
+                try:
+                    with autocast_ctx:
+                        results = model.generate(
+                            prompts, 
+                            None,  # image
+                            max_gen_len=args.test_prompt_max_gen_len, 
+                            temperature=args.test_prompt_temperature, 
+                            top_p=args.test_prompt_top_p
+                        )
+                    success = True
+                    print("Using direct generation")
+                except Exception as e:
+                    print(f"Direct generation failed: {str(e)[:100]}...")
+            
+            # Strategy 2: Try FSDP summon_full_params
+            if not success and isinstance(model, FSDP):
+                try:
+                    print("Trying FSDP summon_full_params...")
+                    with FSDP.summon_full_params(model, writeback=False, recurse=True):
                         with autocast_ctx:
                             results = model.generate(
                                 prompts, 
@@ -59,36 +129,66 @@ def test_prompts_during_training(model, prompts, args, step, epoch):
                                 temperature=args.test_prompt_temperature, 
                                 top_p=args.test_prompt_top_p
                             )
-                        
-                        for i, (prompt, result) in enumerate(zip(prompts, results)):
+                    success = True
+                    print("FSDP summon_full_params succeeded")
+                except Exception as e:
+                    print(f"FSDP summon_full_params failed: {str(e)[:100]}...")
+            
+            # Strategy 3: Try with state_dict_type context (alternative FSDP approach)
+            if not success and isinstance(model, FSDP):
+                try:
+                    print("Trying FSDP state_dict_type context...")
+                    from torch.distributed.fsdp import StateDictType, FullStateDictConfig
+                    with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, FullStateDictConfig(offload_to_cpu=False, rank0_only=False)):
+                        with autocast_ctx:
+                            results = model.generate(
+                                prompts, 
+                                None,  # image
+                                max_gen_len=args.test_prompt_max_gen_len, 
+                                temperature=args.test_prompt_temperature, 
+                                top_p=args.test_prompt_top_p
+                            )
+                    success = True
+                    print("FSDP state_dict_type context succeeded")
+                except Exception as e:
+                    print(f"FSDP state_dict_type context failed: {str(e)[:100]}...")
+            
+            # Strategy 4: Simple tokenization test (fallback)
+            if not success:
+                print("All generation strategies failed. Running simple tokenization test...")
+                try:
+                    # Just test tokenization to show the prompts
+                    tokenizer = getattr(model, 'tokenizer', None)
+                    if hasattr(model, 'module') and hasattr(model.module, 'tokenizer'):
+                        tokenizer = model.module.tokenizer
+                    elif hasattr(model, '_fsdp_wrapped_module') and hasattr(model._fsdp_wrapped_module, 'tokenizer'):
+                        tokenizer = model._fsdp_wrapped_module.tokenizer
+                    
+                    if tokenizer:
+                        for i, prompt in enumerate(prompts):
+                            tokens = tokenizer.encode(prompt, bos=True, eos=False)
                             print(f"\nPrompt {i+1}: {prompt}")
-                            print(f"Response: {result}")
+                            print(f"Tokenized length: {len(tokens)} tokens")
+                            print(f"Response: [Generation unavailable during FSDP training - will retry at next interval]")
                             print("-" * 40)
-                            
-                    except Exception as inner_e:
-                        print(f"FSDP inference failed: {inner_e}")
-                        print("This is normal for some FSDP configurations during training.")
-                        print("Prompts will be tested again at the next interval.")
-                        
-            else:
-                # For regular models
-                with autocast_ctx:
-                    results = model.generate(
-                        prompts, 
-                        None,  # image
-                        max_gen_len=args.test_prompt_max_gen_len, 
-                        temperature=args.test_prompt_temperature, 
-                        top_p=args.test_prompt_top_p
-                    )
-                
+                        success = True
+                    else:
+                        print("Could not access tokenizer for fallback test")
+                except Exception as e:
+                    print(f"Tokenization fallback failed: {e}")
+            
+            # Display results if any strategy succeeded
+            if success and 'results' in locals():
                 for i, (prompt, result) in enumerate(zip(prompts, results)):
                     print(f"\nPrompt {i+1}: {prompt}")
                     print(f"Response: {result}")
                     print("-" * 40)
-                    
+            elif not success:
+                print("All strategies failed. This is common with FSDP during training.")
+                print("Consider using a smaller model or testing prompts less frequently.")
+                
     except Exception as e:
-        print(f"Prompt testing error: {e}")
-        print("Training continues normally. Consider adjusting prompt test settings if this persists.")
+        print(f"Unexpected error in prompt testing: {e}")
         
     finally:
         # Always restore training state
@@ -175,8 +275,13 @@ def train_one_epoch(model: torch.nn.Module,
 
         # test prompts during training
         if update_grad and hasattr(args, 'test_prompts') and args.test_prompts:
-            test_prompts_during_training(model, args.test_prompts, args, 
-                                       (data_iter_step + 1) // accum_iter, epoch)
+            test_mode = getattr(args, 'test_prompt_mode', 'auto')
+            if test_mode == 'log_only':
+                simple_prompt_logging(args.test_prompts, args, 
+                                    (data_iter_step + 1) // accum_iter, epoch)
+            else:
+                test_prompts_during_training(model, args.test_prompts, args, 
+                                           (data_iter_step + 1) // accum_iter, epoch)
 
         # save within epoch
         n_update_per_save = args.save_iteration_interval // accum_iter

@@ -146,6 +146,8 @@ def get_args_parser():
                         help='Temperature for test prompt generation')
     parser.add_argument('--test_prompt_top_p', default=0.9, type=float,
                         help='Top-p for test prompt generation')
+    parser.add_argument('--test_prompt_mode', default='auto', choices=['auto', 'generate', 'log_only'],
+                        help='Prompt testing mode: auto (try generation, fallback to log), generate (force generation), log_only (just log prompts)')
 
     return parser
 
