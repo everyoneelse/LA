@@ -57,6 +57,22 @@ def main():
     .stMarkdown h3 {
         margin-bottom: 0.5rem !important;
     }
+    
+    /* 优化markdown在表格中间的显示效果 */
+    .table-center-content {
+        background-color: #f8f9fa;
+        border: 1px solid #dee2e6;
+        border-radius: 8px;
+        padding: 15px;
+        text-align: center;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    
+    .table-center-content strong {
+        color: #495057;
+        font-size: 14px;
+        line-height: 1.4;
+    }
     </style>
     """, unsafe_allow_html=True)
     
@@ -92,11 +108,21 @@ def main():
             )
         
         with col2:
-            # 第一个选择框 - 精确对齐
-            st.markdown("**选择 competitor_product**")
-            # 添加多个空行来匹配表格的垂直位置
-            st.markdown("")  # 空行1
-            st.markdown("")  # 空行2
+            # 使用HTML和CSS来精确控制markdown在表格中间的位置
+            st.markdown("""
+            <div style="display: flex; flex-direction: column; height: 200px; justify-content: center; align-items: center;">
+                <div class="table-center-content">
+                    <div style="margin-bottom: 10px;">
+                        <strong>判断在语义上友商技术是否属于UIH</strong>
+                    </div>
+                    <div>
+                        <strong>选择数据行索引</strong>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # 选择框放在markdown下方
             competitor_product_options = competitor_df['competitor_product'].tolist()
             selected_competitor_product = st.selectbox(
                 "选择 competitor_product",
@@ -106,11 +132,21 @@ def main():
             )
         
         with col3:
-            # 第二个选择框 - 精确对齐
-            st.markdown("**选择 competitor index**")
-            # 添加多个空行来匹配表格的垂直位置
-            st.markdown("")  # 空行1
-            st.markdown("")  # 空行2
+            # 使用HTML和CSS来精确控制markdown在表格中间的位置
+            st.markdown("""
+            <div style="display: flex; flex-direction: column; height: 200px; justify-content: center; align-items: center;">
+                <div class="table-center-content">
+                    <div style="margin-bottom: 10px;">
+                        <strong>判断在语义上UIH技术属于哪个候选项</strong>
+                    </div>
+                    <div>
+                        <strong>选择数据行索引</strong>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # 选择框放在markdown下方
             competitor_index_options = competitor_df['index'].tolist()
             selected_competitor_index = st.selectbox(
                 "选择数据行索引",
@@ -145,11 +181,21 @@ def main():
             )
         
         with col2:
-            # 第一个选择框 - 精确对齐
-            st.markdown("**选择 uih_product**")
-            # 添加多个空行来匹配表格的垂直位置
-            st.markdown("")  # 空行1
-            st.markdown("")  # 空行2
+            # 使用HTML和CSS来精确控制markdown在表格中间的位置
+            st.markdown("""
+            <div style="display: flex; flex-direction: column; height: 200px; justify-content: center; align-items: center;">
+                <div class="table-center-content">
+                    <div style="margin-bottom: 10px;">
+                        <strong>判断在语义上友商技术是否属于UIH</strong>
+                    </div>
+                    <div>
+                        <strong>选择数据行索引</strong>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # 选择框放在markdown下方
             uih_product_options = uih_df['uih_product'].tolist()
             selected_uih_product = st.selectbox(
                 "选择 uih_product",
@@ -159,11 +205,21 @@ def main():
             )
         
         with col3:
-            # 第二个选择框 - 精确对齐
-            st.markdown("**选择 uih index**")
-            # 添加多个空行来匹配表格的垂直位置
-            st.markdown("")  # 空行1
-            st.markdown("")  # 空行2
+            # 使用HTML和CSS来精确控制markdown在表格中间的位置
+            st.markdown("""
+            <div style="display: flex; flex-direction: column; height: 200px; justify-content: center; align-items: center;">
+                <div class="table-center-content">
+                    <div style="margin-bottom: 10px;">
+                        <strong>判断在语义上UIH技术属于哪个候选项</strong>
+                    </div>
+                    <div>
+                        <strong>选择数据行索引</strong>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # 选择框放在markdown下方
             uih_index_options = uih_df['index'].tolist()
             selected_uih_index = st.selectbox(
                 "选择数据行索引",
