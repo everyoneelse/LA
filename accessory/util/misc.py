@@ -596,14 +596,32 @@ def mark_mp_params(model: torch.nn.Module):
             m.weight.is_model_parallel = True
 
 
-def print_param_status(model: torch.nn.Module) -> None:
+def print_param_status(model: torch.nn.Module, exclude_embedding: bool = True) -> None:
     require_grad_set = []
     no_grad_set = []
+    embedding_params_count = 0
+    embedding_params_size = 0
+    
     for name, param in model.named_parameters():
+        # Check if this parameter belongs to an embedding layer
+        is_embedding = any(keyword in name.lower() for keyword in [
+            'embed', 'embedding', 'token_embedding', 'word_embedding', 
+            'tok_embeddings', 'word_embeddings', 'class_embedding', 
+            'positional_embedding'
+        ])
+        
+        if is_embedding and exclude_embedding:
+            embedding_params_count += 1
+            embedding_params_size += param.numel()
+            continue
+            
         if param.requires_grad:
             require_grad_set.append((name, param))
         else:
             no_grad_set.append((name, param))
+
+    if exclude_embedding and embedding_params_count > 0:
+        print(f"Excluded {embedding_params_count} embedding parameters ({embedding_params_size:,} total parameters)\n")
 
     print("Params that require gradient:\n")
     for name, param in require_grad_set:
