@@ -161,19 +161,37 @@ class FalconIterator:
 
 
 class FalconVal(Dataset):
-    def __init__(self, data_meta_path, data_root, tokenizer_path, max_words=None):
+    def __init__(self, data_meta_path, data_root, tokenizer_path, max_words=None, val_data_meta_path=None, val_data_root=None):
 
-        with open(data_meta_path, 'r') as f:
-            filenames = json.load(f)
-            filenames = [f"{data_root}/{_}" for _ in filenames]
+        # 如果指定了独立的验证数据集配置，使用它；否则使用训练数据集的最后一个文件
+        if val_data_meta_path is not None:
+            print(f"Using separate validation dataset from: {val_data_meta_path}")
+            with open(val_data_meta_path, 'r') as f:
+                val_filenames = json.load(f)
+            val_data_root_path = val_data_root if val_data_root is not None else data_root
+            val_filenames = [f"{val_data_root_path}/{_}" for _ in val_filenames]
+            val_filenames = [_.replace('.parquet', '.pkl') for _ in val_filenames]
+            
+            # 加载所有验证文件
+            self.contents = []
+            for filename in val_filenames:
+                print(f"Loading validation file: {filename}")
+                with open(filename, 'rb') as f:
+                    ann = pickle.load(f)
+                self.contents.extend(ann)
+        else:
+            # 原有逻辑：使用训练数据集的最后一个文件作为验证集
+            with open(data_meta_path, 'r') as f:
+                filenames = json.load(f)
+                filenames = [f"{data_root}/{_}" for _ in filenames]
 
-        filenames = [_.replace('.parquet', '.pkl') for _ in filenames]
+            filenames = [_.replace('.parquet', '.pkl') for _ in filenames]
 
-        filename = filenames[-1]
-        print(f"Falcon val filename: {filename}")
-        with open(filename, 'rb') as f:
-            ann = pickle.load(f)
-        self.contents = ann
+            filename = filenames[-1]
+            print(f"Falcon val filename: {filename}")
+            with open(filename, 'rb') as f:
+                ann = pickle.load(f)
+            self.contents = ann
 
         self.tokenizer = Tokenizer(model_path=tokenizer_path)
 
