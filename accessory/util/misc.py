@@ -1,6 +1,7 @@
 import builtins
 import datetime
 import os
+import re
 import shutil
 import socket
 import dataclasses
@@ -320,6 +321,40 @@ class NativeScalerWithGradNormCount:
         self._scaler.load_state_dict(state_dict)
 
 
+def cleanup_old_checkpoints(output_dir, max_checkpoints=1):
+    """Remove old checkpoints, keeping only the most recent ones."""
+    if output_dir is None or not os.path.exists(output_dir):
+        return
+    
+    # Find all checkpoint directories
+    checkpoint_dirs = []
+    for item in os.listdir(output_dir):
+        item_path = os.path.join(output_dir, item)
+        if os.path.isdir(item_path) and item.startswith("epoch"):
+            # Parse epoch and iteration from directory name
+            epoch_match = re.search(r'epoch(\d+)', item)
+            iter_match = re.search(r'iter(\d+)', item)
+            
+            if epoch_match:
+                epoch_num = int(epoch_match.group(1))
+                iter_num = int(iter_match.group(1)) if iter_match else 0
+                checkpoint_dirs.append((item_path, epoch_num, iter_num))
+    
+    # Sort by epoch, then by iteration (most recent last)
+    checkpoint_dirs.sort(key=lambda x: (x[1], x[2]))
+    
+    # Remove old checkpoints, keep only the most recent max_checkpoints
+    if len(checkpoint_dirs) > max_checkpoints:
+        dirs_to_remove = checkpoint_dirs[:-max_checkpoints]
+        for dir_path, _, _ in dirs_to_remove:
+            try:
+                import shutil
+                shutil.rmtree(dir_path)
+                print(f"Removed old checkpoint: {os.path.basename(dir_path)}")
+            except Exception as e:
+                print(f"Warning: Failed to remove checkpoint {dir_path}: {e}")
+
+
 def save_checkpoint(output_dir, args, model, optimizer,
                     loss_scaler, dataset_state, epoch=None, iteration=None):
     save_name = f"epoch{epoch}"
@@ -435,6 +470,11 @@ def save_checkpoint(output_dir, args, model, optimizer,
 
     _save_rank_specific()
     print("rank-specific saved")
+    
+    # Cleanup old checkpoints, keeping only the most recent one
+    max_checkpoints = getattr(args, 'max_checkpoints', 1)
+    if dist.get_rank() == 0:  # Only cleanup on rank 0 to avoid race conditions
+        cleanup_old_checkpoints(output_dir, max_checkpoints)
 
 
 def resume_stage1(args, model_without_FSDP):

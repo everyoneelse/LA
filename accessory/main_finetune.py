@@ -112,6 +112,8 @@ def get_args_parser():
                         help='number of epochs between model saving')
     parser.add_argument('--save_iteration_interval', default=5000, type=int,
                         help='number of iterations between within-epoch model saving')
+    parser.add_argument('--max_checkpoints', default=1, type=int,
+                        help='maximum number of checkpoints to keep (default: 1)')
     parser.add_argument('--only_save_trainable', default=False, action="store_true",
                         help='only save trainable model parameters')
     parser.add_argument('--seed', default=0, type=int)

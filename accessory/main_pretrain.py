@@ -100,6 +100,8 @@ def get_args_parser():
                         help='path where to save, empty for no saving')
     parser.add_argument('--save_freq', type=int, default=5000,
                         help='number of iterations between model saving')
+    parser.add_argument('--max_checkpoints', default=1, type=int,
+                        help='maximum number of checkpoints to keep (default: 1)')
     parser.add_argument('--seed', default=0, type=int)
     parser.add_argument('--resume', default='',
                         help='resume from checkpoint')
