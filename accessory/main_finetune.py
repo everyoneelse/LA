@@ -86,7 +86,7 @@ def get_args_parser():
     parser.add_argument('--min_lr', type=float, default=0.0001, metavar='LR',
                         help='lower lr bound for cyclic schedulers that hit 0')
 
-    parser.add_argument('--epochs', default=400, type=int)
+    parser.add_argument('--epochs', default=400, type=float)
     parser.add_argument('--warmup_epochs', type=float, default=1.0, metavar='N',
                         help='epoch to warmup LR')
 
@@ -326,18 +326,34 @@ def main(args):
 
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
-    for epoch in range(start_epoch, args.epochs):
+    
+    # Support fractional epochs by calculating total steps needed
+    total_epochs_int = int(args.epochs)
+    fractional_part = args.epochs - total_epochs_int
+    
+    for epoch in range(start_epoch, total_epochs_int + (1 if fractional_part > 0 else 0)):
+        # Check if this is the last fractional epoch
+        is_last_fractional = (epoch == total_epochs_int and fractional_part > 0)
+        
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch, start_iter)
 
+        # For fractional epoch, calculate how many steps to train
+        max_steps = None
+        if is_last_fractional:
+            total_steps = len(data_loader_train)
+            max_steps = int(total_steps * fractional_part)
+            print(f"Training fractional epoch {epoch} with {max_steps}/{total_steps} steps ({fractional_part:.2%})")
+        
         train_stats = train_one_epoch(
             model, data_loader_train,
             optimizer, epoch, start_iter, loss_scaler,
             log_writer=log_writer,
-            args=args
+            args=args,
+            max_steps=max_steps
         )
 
-        if args.output_dir and (epoch % args.save_interval == 0 or epoch + 1 == args.epochs):
+        if args.output_dir and (epoch % args.save_interval == 0 or epoch + 1 >= args.epochs):
             misc.save_checkpoint(
                 output_dir=args.output_dir,
                 args=args, epoch=epoch, iteration=None, model=model, optimizer=optimizer,
@@ -355,6 +371,10 @@ def main(args):
                 f.write(json.dumps(log_stats) + "\n")
 
         start_iter = 0
+        
+        # Break after fractional epoch
+        if is_last_fractional:
+            break
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
