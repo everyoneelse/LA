@@ -8,6 +8,11 @@ import torch
 import accessory.util.misc as misc
 import accessory.util.lr_sched as lr_sched
 from accessory.util.flop_counter import FLOPCounter, TokenCounter, get_model_config_from_model
+from accessory.util.hellaswag_eval import run_hellaswag_evaluation, print_hellaswag_results, save_hellaswag_results
+from accessory.util.hellaswag_eval_fsdp import run_hellaswag_evaluation_fsdp
+from accessory.util.hellaswag_eval_proper import run_hellaswag_evaluation_fsdp_proper
+from accessory.util.hellaswag_eval_debug_shapes import run_hellaswag_evaluation_debug_shapes
+from accessory.util.hellaswag_eval_fixed import run_hellaswag_evaluation_fsdp_fixed
 
 from fairscale.nn.model_parallel import initialize as fs_init
 
@@ -164,6 +169,25 @@ def _async_validator_worker(args_namespace):
                 metrics = None
             if metrics is not None:
                 print(f"[AsyncValidator/Child] {os.path.basename(latest)} metrics: {metrics}")
+                
+                # HellaSwag evaluation in async mode (using FSDP-compatible version)
+                if getattr(args, 'hellaswag_eval', False):
+                    try:
+                        # In async mode, we're running on a single process, so no distributed issues
+                        # But still use the proper version for consistency
+                        hellaswag_metrics = run_hellaswag_evaluation_fsdp_proper(
+                            model=eval_model,
+                            data_dir=getattr(args, 'hellaswag_data_dir', 'data/hellaswag/'),
+                            tokenizer=getattr(eval_model, 'tokenizer', None),
+                            batch_size=getattr(args, 'hellaswag_batch_size', 4),
+                            max_samples=getattr(args, 'hellaswag_max_samples', None),
+                            max_length=getattr(args, 'max_words', 512),
+                            device=args.val_device if args.val_device is not None else 'cuda'
+                        )
+                        print(f"[AsyncValidator/Child] HellaSwag metrics: {hellaswag_metrics}")
+                        # Note: In async mode, we don't save results to avoid conflicts
+                    except Exception as e:
+                        print(f"[AsyncValidator/Child] HellaSwag evaluation failed: {e}")
             try:
                 del eval_model
                 torch.cuda.empty_cache()
@@ -298,6 +322,46 @@ def train_one_epoch(model: torch.nn.Module,
                 if log_writer is not None:
                     for metric_name, metric_value in val_metrics.items():
                         log_writer.add_scalar("val/" + metric_name, metric_value, data_iter_step)
+                
+                # HellaSwag evaluation (FSDP-compatible version)
+                if getattr(args, 'hellaswag_eval', False):
+                    try:
+                        # Use debug version to diagnose shape issues
+                        if getattr(args, 'hellaswag_debug', False):
+                            # Debug mode with detailed shape information
+                            hellaswag_metrics = run_hellaswag_evaluation_debug_shapes(
+                                model=model,
+                                data_dir=getattr(args, 'hellaswag_data_dir', 'data/hellaswag/'),
+                                tokenizer=getattr(model, 'tokenizer', None),
+                                batch_size=getattr(args, 'hellaswag_batch_size', 4),
+                                max_samples=getattr(args, 'hellaswag_max_samples', None),
+                                max_length=getattr(args, 'max_words', 512),
+                                device='cuda'
+                            )
+                        else:
+                            # Use fixed version with better rank display
+                            hellaswag_metrics = run_hellaswag_evaluation_fsdp_fixed(
+                                model=model,
+                                data_dir=getattr(args, 'hellaswag_data_dir', 'data/hellaswag/'),
+                                tokenizer=getattr(model, 'tokenizer', None),
+                                batch_size=getattr(args, 'hellaswag_batch_size', 4),
+                                max_samples=getattr(args, 'hellaswag_max_samples', None),
+                                max_length=getattr(args, 'max_words', 512),
+                                device='cuda'
+                            )
+                        
+                        # Only main process saves and logs results
+                        if misc.is_main_process():
+                            print_hellaswag_results(hellaswag_metrics, data_iter_step + 1)
+                            save_hellaswag_results(hellaswag_metrics, args.output_dir, data_iter_step + 1)
+                            
+                            if log_writer is not None:
+                                for metric_name, metric_value in hellaswag_metrics.items():
+                                    log_writer.add_scalar("hellaswag/" + metric_name, metric_value, data_iter_step)
+                    except Exception as e:
+                        if misc.is_main_process():
+                            print(f"Warning: HellaSwag evaluation failed: {e}")
+                
                 model.train(True)
         else:
             # Async mode: create lightweight snapshots for validator consumption
