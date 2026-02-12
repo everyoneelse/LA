@@ -135,6 +135,20 @@ def get_args_parser():
     parser.add_argument('--quant', action="store_true", default=False,
                         help="enable quantization to speedup and save memory")
 
+    # Prompt testing parameters
+    parser.add_argument('--test_prompts', default=[], nargs="*",
+                        help='List of prompts to test during training')
+    parser.add_argument('--test_prompt_interval', default=500, type=int,
+                        help='Number of steps between prompt testing')
+    parser.add_argument('--test_prompt_max_gen_len', default=64, type=int,
+                        help='Maximum generation length for test prompts')
+    parser.add_argument('--test_prompt_temperature', default=0.1, type=float,
+                        help='Temperature for test prompt generation')
+    parser.add_argument('--test_prompt_top_p', default=0.9, type=float,
+                        help='Top-p for test prompt generation')
+    parser.add_argument('--test_prompt_mode', default='auto', choices=['auto', 'generate', 'log_only'],
+                        help='Prompt testing mode: auto (try generation, fallback to log), generate (force generation), log_only (just log prompts)')
+
     return parser
 
 
