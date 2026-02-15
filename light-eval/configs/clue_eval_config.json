@@ -1,0 +1,37 @@
+{
+  "model_config": {
+    "llama_type": "llama",
+    "llama_config": "/path/to/your/model/params.json",
+    "tokenizer_path": "/path/to/your/tokenizer.model",
+    "pretrained_path": "/path/to/your/pretrained/model",
+    "max_seq_len": 2048,
+    "quant": false
+  },
+  "data_config": {
+    "data_dir": "data/clue",
+    "tasks": ["afqmc", "tnews", "cmnli", "iflytek", "csl", "wsc"],
+    "ntrain": 5,
+    "max_eval_samples": null
+  },
+  "generation_config": {
+    "temperature": 0.1,
+    "top_p": 0.9,
+    "max_gen_len": 256
+  },
+  "device_config": {
+    "device": "cuda",
+    "model_parallel_size": 1
+  },
+  "evaluation_notes": {
+    "description": "CLUE Benchmark评估配置",
+    "tasks_description": {
+      "afqmc": "蚂蚁金融语义相似度 - 二分类",
+      "tnews": "今日头条新闻分类 - 15类",
+      "cmnli": "中文自然语言推理 - 三分类",
+      "iflytek": "科大讯飞应用分类 - 119类",
+      "csl": "中文科学文献关键词识别 - 二分类",
+      "wsc": "中文指代消解 - 二分类"
+    },
+    "usage": "修改相应路径后，可以通过命令行参数覆盖这些配置"
+  }
+}
