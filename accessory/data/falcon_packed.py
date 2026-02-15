@@ -96,6 +96,11 @@ class FalconIterator:
         self._pre_cache = None
         self._pre_cache_thread = None
 
+        # Check if we have any files to process
+        if len(self._filenames) == 0:
+            print(f"{self.print_head} Warning: No files to process")
+            raise StopIteration
+
         if len(state_dict) != 0:
             self._file_idx = state_dict[self.worker_id]['_file_idx'] - 1
             self._pre_cache_thread = Thread(target=self._preload_cache)
@@ -116,10 +121,14 @@ class FalconIterator:
             self._pre_cache = None
         else:
             print(f"{self.print_head} current {self._file_idx}, async load {self._file_idx + 1} {self._filenames[self._file_idx + 1]}")
-
-            with open(self._filenames[self._file_idx + 1], 'rb') as f:
-                ann = pickle.load(f)
-            self._pre_cache = ann
+            
+            try:
+                with open(self._filenames[self._file_idx + 1], 'rb') as f:
+                    ann = pickle.load(f)
+                self._pre_cache = ann
+            except Exception as e:
+                print(f"{self.print_head} Error loading file {self._filenames[self._file_idx + 1]}: {e}")
+                self._pre_cache = None
 
         return
 
@@ -127,10 +136,23 @@ class FalconIterator:
         self._pre_cache_thread.join()
 
         if self._file_idx + 1 >= len(self._filenames):
-            assert self._pre_cache is None
+            # No more files to load
+            if self._pre_cache is not None:
+                print(f"{self.print_head} Warning: pre_cache is not None when no more files to load")
             raise StopIteration
         else:
-            assert self._pre_cache is not None
+            # Check if pre_cache was loaded successfully
+            if self._pre_cache is None:
+                # Try to load the file directly if preload failed
+                print(f"{self.print_head} Warning: pre_cache is None, trying to load file directly")
+                try:
+                    with open(self._filenames[self._file_idx + 1], 'rb') as f:
+                        ann = pickle.load(f)
+                    self._pre_cache = ann
+                except Exception as e:
+                    print(f"{self.print_head} Error: Failed to load file {self._filenames[self._file_idx + 1]}: {e}")
+                    raise StopIteration
+            
             self._curr_contents = self._pre_cache
 
             self._pre_cache = None
@@ -145,7 +167,8 @@ class FalconIterator:
             self._pre_cache_thread.start()
 
     def __next__(self):
-        if self._curr_idx >= len(self._curr_contents):
+        # Check if we need to load a new file
+        if self._curr_contents is None or self._curr_idx >= len(self._curr_contents):
             self._load_new_file()
 
         ann = self._curr_contents[self._curr_idx]
