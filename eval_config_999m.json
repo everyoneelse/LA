@@ -1,0 +1,99 @@
+{
+  "model_info": {
+    "model_name": "999M-model",
+    "description": "999M参数的语言模型评估配置",
+    "size_gb": "约2GB (bf16)"
+  },
+  
+  "evaluation_settings": {
+    "eval_types": ["basic", "perplexity", "quality", "speed"],
+    "batch_size": 1,
+    "max_seq_len": 4096,
+    "max_gen_len": 256,
+    "temperature": 0.1,
+    "top_p": 0.75,
+    "dtype": "bf16"
+  },
+  
+  "benchmark_tests": {
+    "gsm8k": {
+      "description": "数学推理能力测试",
+      "script": "light-eval/scripts/run_gsm8k.sh",
+      "importance": "high",
+      "data_path": "light-eval/data/gsm8k/"
+    },
+    "mmlu": {
+      "description": "多任务知识理解",
+      "script": "light-eval/scripts/run_mmlu.sh",
+      "importance": "high",
+      "data_path": "需要下载MMLU数据集"
+    },
+    "humaneval": {
+      "description": "代码生成能力",
+      "script": "light-eval/scripts/run_humaneval.sh",
+      "importance": "medium",
+      "data_path": "需要下载HumanEval数据集"
+    },
+    "ceval": {
+      "description": "中文综合能力",
+      "script": "light-eval/scripts/run_ceval.sh",
+      "importance": "high",
+      "data_path": "需要下载C-Eval数据集"
+    }
+  },
+  
+  "optimization_checklist": {
+    "data_quality": [
+      "检查训练数据的多样性",
+      "分析数据分布是否均衡",
+      "识别数据质量问题（噪声、重复等）",
+      "考虑增加特定领域的数据"
+    ],
+    "training_parameters": [
+      "学习率调度策略",
+      "批量大小和梯度累积",
+      "优化器选择（AdamW vs others）",
+      "权重衰减和正则化"
+    ],
+    "model_architecture": [
+      "注意力机制优化",
+      "FFN维度调整",
+      "层数和隐藏维度平衡",
+      "激活函数选择"
+    ],
+    "inference_optimization": [
+      "量化（INT8/INT4）",
+      "KV-cache优化",
+      "批处理推理",
+      "模型蒸馏"
+    ]
+  },
+  
+  "performance_baselines": {
+    "perplexity": {
+      "excellent": "< 15",
+      "good": "15-25",
+      "acceptable": "25-40",
+      "needs_improvement": "> 40"
+    },
+    "inference_speed": {
+      "fast": "> 50 tokens/s",
+      "moderate": "20-50 tokens/s",
+      "slow": "< 20 tokens/s"
+    },
+    "quality_score": {
+      "excellent": "> 0.8",
+      "good": "0.6-0.8",
+      "needs_improvement": "< 0.6"
+    }
+  },
+  
+  "next_steps": [
+    "运行综合评估脚本获取基线性能",
+    "在标准benchmark上测试（GSM8K, MMLU等）",
+    "分析弱项和强项",
+    "根据评估结果制定优化计划",
+    "实施改进措施",
+    "重新评估验证改进效果"
+  ]
+}
