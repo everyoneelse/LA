@@ -512,6 +512,9 @@ def resume_stage2(args, model, optimizer, loss_scaler, dataset_train):
                 args.resume,
                 f"rank-specific-{dist.get_rank():05d}-of-{dist.get_world_size():05d}.pth",
             )
+            if getattr(args, "resume_reset_data_idx", False):
+                print("resume_reset_data_idx enabled: skip loading dataset state, data iteration restarts from beginning")
+                return
             try:
                 rank_specific_state_dict = torch.load(rank_specific_checkpoint_path)
                 dataset_train.load_state_dict(rank_specific_state_dict["dataset_state"])

@@ -220,7 +220,9 @@ def train_one_epoch(model: torch.nn.Module,
     ):
 
         if data_iter_step % accum_iter == 0:
-            lr_sched.adjust_learning_rate(optimizer, data_iter_step, args)
+            lr_offset = getattr(args, "lr_resume_offset", 0)
+            lr_sched_step = max(data_iter_step - lr_offset, 0)
+            lr_sched.adjust_learning_rate(optimizer, lr_sched_step, args)
 
         # Update token counter
         batch_size, seq_len = examples.shape

@@ -40,6 +40,7 @@ except ImportError:
     from torch.optim import AdamW
 
 import accessory.util.misc as misc
+import accessory.util.lr_sched as lr_sched
 from accessory.util.misc import NativeScalerWithGradNormCount as NativeScaler
 from accessory.util.tensor_type import default_tensor_type, promote_trainable_params_to_fp32
 from accessory.util.tensor_parallel import load_tensor_parallel_model_list
@@ -82,6 +83,9 @@ def get_args_parser():
                         help='iterations to warmup LR')
     parser.add_argument('--lr_decay_iters', type=int, default=1800000, metavar='N',
                         help='iters before keeping minimal learning rate')
+    parser.add_argument('--lr_schedule', type=str, default='cosine',
+                        choices=['cosine', 'constant'],
+                        help='learning rate schedule type')
 
     parser.add_argument('--clip_grad', type=int, default=-1,
                         help='grad clipping norm')
@@ -103,6 +107,10 @@ def get_args_parser():
     parser.add_argument('--seed', default=0, type=int)
     parser.add_argument('--resume', default='',
                         help='resume from checkpoint')
+    parser.add_argument('--resume_reset_data_idx', action='store_true',
+                        help='when resuming, ignore dataset state and restart data loading from the beginning')
+    parser.add_argument('--resume_reset_lr', action='store_true',
+                        help='when resuming, keep iteration/optimizer states but restart lr schedule from step 0')
 
     parser.add_argument('--num_workers', default=5, type=int)
     parser.add_argument('--pin_mem', action='store_true',
@@ -274,9 +282,14 @@ def main(args):
     )
 
     start_iter = 0
+    args.lr_resume_offset = 0
     if args.resume:
         _, start_iter = misc.resume_stage2(args=args, model=model, optimizer=optimizer,
                                            loss_scaler=loss_scaler, dataset_train=dataset_train)
+        if args.resume_reset_lr:
+            args.lr_resume_offset = start_iter
+            lr_sched.adjust_learning_rate(optimizer, 0, args)
+            print(f"resume_reset_lr enabled: keeping global iter={start_iter}, but lr schedule restarts from 0")
 
     print(f"Start training")
     start_time = time.time()
