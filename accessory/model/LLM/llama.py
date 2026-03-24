@@ -370,7 +370,7 @@ class Transformer(nn.Module):
         return image_tokens
 
 
-    def forward(self, examples, image=None):
+    def forward(self, examples, image=None, attention_mask=None):
         self._destroy_kv_cache()  # training always disables kv cache
         _bsz, seqlen = examples.shape
         h = self.tok_embeddings(examples)
@@ -382,10 +382,17 @@ class Transformer(nn.Module):
             image_words = image_tokens.shape[1]
             h = torch.cat((image_tokens, h), dim=1)
             seqlen = h.shape[1]
+            if attention_mask is not None:
+                # text-only custom attention mask is not compatible with image-token prepend.
+                raise ValueError("attention_mask with image input is not supported")
 
         freqs_cis = self.freqs_cis[:seqlen]
+        if attention_mask is not None:
+            mask = attention_mask
+        else:
+            mask = "causal"
         for layer in self.layers:
-            h = layer(h, start_pos=0, freqs_cis=freqs_cis, mask="causal")
+            h = layer(h, start_pos=0, freqs_cis=freqs_cis, mask=mask)
         h = self.norm(h)
         output = self.output(h[:, image_words:, :])
         return output

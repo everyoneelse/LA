@@ -56,6 +56,12 @@ class MetaModel(nn.Module):
         print("Model Args:\n", model.args)
 
         self.llma = model
+        try:
+            self._llma_supports_attention_mask = (
+                "attention_mask" in inspect.signature(self.llma.forward).parameters
+            )
+        except (TypeError, ValueError):
+            self._llma_supports_attention_mask = False
 
         self.criterion = torch.nn.CrossEntropyLoss(ignore_index=0)
 
@@ -223,7 +229,7 @@ class MetaModel(nn.Module):
         for key, value in self.get_trainable_params().items():
             value.requires_grad = True
 
-    def forward(self, examples, labels, images=None):
+    def forward(self, examples, labels, images=None, attention_mask=None):
         with torch.no_grad():
             non_zero_ = torch.count_nonzero(labels, dim=0)
             pos = non_zero_.shape[0] - 1
@@ -240,7 +246,15 @@ class MetaModel(nn.Module):
             examples = examples[:, :pos+1]
             labels = labels[:, :pos+1]
 
-        output = self.llma(examples, images)
+        if attention_mask is not None:
+            if not self._llma_supports_attention_mask:
+                raise RuntimeError(
+                    f"llama_type={self.llama_type} does not support attention_mask in Transformer.forward. "
+                    f"Please use a model variant that supports it (e.g. llama) or disable --reset_attention_mask."
+                )
+            output = self.llma(examples, images, attention_mask=attention_mask)
+        else:
+            output = self.llma(examples, images)
         if isinstance(output, tuple):
             output, additional_loss = output
         else:

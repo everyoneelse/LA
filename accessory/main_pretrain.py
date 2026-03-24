@@ -40,6 +40,7 @@ except ImportError:
     from torch.optim import AdamW
 
 import accessory.util.misc as misc
+import accessory.util.lr_sched as lr_sched
 from accessory.util.misc import NativeScalerWithGradNormCount as NativeScaler
 from accessory.util.tensor_type import default_tensor_type, promote_trainable_params_to_fp32
 from accessory.util.tensor_parallel import load_tensor_parallel_model_list
@@ -82,6 +83,9 @@ def get_args_parser():
                         help='iterations to warmup LR')
     parser.add_argument('--lr_decay_iters', type=int, default=1800000, metavar='N',
                         help='iters before keeping minimal learning rate')
+    parser.add_argument('--lr_schedule', type=str, default='cosine',
+                        choices=['cosine', 'constant'],
+                        help='learning rate schedule type')
 
     parser.add_argument('--clip_grad', type=int, default=-1,
                         help='grad clipping norm')
@@ -93,6 +97,10 @@ def get_args_parser():
                         help='root path for data')
     parser.add_argument('--packed_data', action="store_true",
                         help='use packed dataset')
+    parser.add_argument('--reset_attention_mask', action='store_true',
+                        help='for packed data, reset attention across EOS boundaries')
+    parser.add_argument('--eod_mask_loss', action='store_true',
+                        help='mask EOS token loss during training')
     parser.add_argument('--max_words', default=2048, type=int,
                         help='max token length')
 
@@ -103,6 +111,10 @@ def get_args_parser():
     parser.add_argument('--seed', default=0, type=int)
     parser.add_argument('--resume', default='',
                         help='resume from checkpoint')
+    parser.add_argument('--resume_reset_data_idx', action='store_true',
+                        help='when resuming, ignore dataset state and restart data loading from the beginning')
+    parser.add_argument('--resume_reset_lr', action='store_true',
+                        help='when resuming, keep iteration/optimizer states but restart lr schedule from step 0')
 
     parser.add_argument('--num_workers', default=5, type=int)
     parser.add_argument('--pin_mem', action='store_true',
@@ -246,6 +258,14 @@ def main(args):
     dataset_val = DatasetValCls(args.data_meta_path, args.data_root, tokenizer_path=args.tokenizer_path,
                                 max_words=args.max_words)
     print(dataset_train)
+    args.eod_token_id = dataset_train.tokenizer.eos_id
+    if args.reset_attention_mask and not args.packed_data:
+        warnings.warn("reset_attention_mask is usually intended for packed_data mode")
+    if args.reset_attention_mask or args.eod_mask_loss:
+        print(
+            f"mask config: reset_attention_mask={args.reset_attention_mask}, "
+            f"eod_mask_loss={args.eod_mask_loss}, eod_token_id={args.eod_token_id}"
+        )
 
     if global_rank == 0 and args.output_dir is not None:
         os.makedirs(args.output_dir, exist_ok=True)
@@ -274,9 +294,14 @@ def main(args):
     )
 
     start_iter = 0
+    args.lr_resume_offset = 0
     if args.resume:
         _, start_iter = misc.resume_stage2(args=args, model=model, optimizer=optimizer,
                                            loss_scaler=loss_scaler, dataset_train=dataset_train)
+        if args.resume_reset_lr:
+            args.lr_resume_offset = start_iter
+            lr_sched.adjust_learning_rate(optimizer, 0, args)
+            print(f"resume_reset_lr enabled: keeping global iter={start_iter}, but lr schedule restarts from 0")
 
     print(f"Start training")
     start_time = time.time()
