@@ -223,7 +223,7 @@ class MetaModel(nn.Module):
         for key, value in self.get_trainable_params().items():
             value.requires_grad = True
 
-    def forward(self, examples, labels, images=None):
+    def forward(self, examples, labels, images=None, attention_mask=None):
         with torch.no_grad():
             non_zero_ = torch.count_nonzero(labels, dim=0)
             pos = non_zero_.shape[0] - 1
@@ -240,7 +240,7 @@ class MetaModel(nn.Module):
             examples = examples[:, :pos+1]
             labels = labels[:, :pos+1]
 
-        output = self.llma(examples, images)
+        output = self.llma(examples, images, attention_mask=attention_mask)
         if isinstance(output, tuple):
             output, additional_loss = output
         else:

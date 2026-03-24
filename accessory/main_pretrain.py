@@ -97,6 +97,10 @@ def get_args_parser():
                         help='root path for data')
     parser.add_argument('--packed_data', action="store_true",
                         help='use packed dataset')
+    parser.add_argument('--reset_attention_mask', action='store_true',
+                        help='for packed data, reset attention across EOS boundaries')
+    parser.add_argument('--eod_mask_loss', action='store_true',
+                        help='mask EOS token loss during training')
     parser.add_argument('--max_words', default=2048, type=int,
                         help='max token length')
 
@@ -254,6 +258,14 @@ def main(args):
     dataset_val = DatasetValCls(args.data_meta_path, args.data_root, tokenizer_path=args.tokenizer_path,
                                 max_words=args.max_words)
     print(dataset_train)
+    args.eod_token_id = dataset_train.tokenizer.eos_id
+    if args.reset_attention_mask and not args.packed_data:
+        warnings.warn("reset_attention_mask is usually intended for packed_data mode")
+    if args.reset_attention_mask or args.eod_mask_loss:
+        print(
+            f"mask config: reset_attention_mask={args.reset_attention_mask}, "
+            f"eod_mask_loss={args.eod_mask_loss}, eod_token_id={args.eod_token_id}"
+        )
 
     if global_rank == 0 and args.output_dir is not None:
         os.makedirs(args.output_dir, exist_ok=True)

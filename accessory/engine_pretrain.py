@@ -21,6 +21,50 @@ import torch.distributed as dist
 import multiprocessing as mp
 
 
+def _build_packed_reset_attention_mask(tokens: torch.Tensor, eod_token_id: int, pad_token_id: int = 0):
+    """
+    Build per-sample causal mask with document-boundary isolation.
+    Tokens from different EOS-separated segments cannot attend to each other.
+    """
+    bsz, seqlen = tokens.shape
+    causal = torch.tril(torch.ones((seqlen, seqlen), dtype=torch.bool, device=tokens.device))
+    attention_mask = torch.zeros((bsz, 1, seqlen, seqlen), dtype=torch.bool, device=tokens.device)
+
+    for b in range(bsz):
+        sample = tokens[b]
+        valid = sample.ne(pad_token_id)
+        eod = sample.eq(eod_token_id) & valid
+        # Keep EOS token in the preceding segment; reset starts after EOS.
+        seg = torch.cumsum(eod.to(torch.int64), dim=0)
+        seg = torch.roll(seg, shifts=1, dims=0)
+        seg[0] = 0
+        same_segment = seg.unsqueeze(0).eq(seg.unsqueeze(1))
+        valid_query = valid.unsqueeze(1)
+        valid_key = valid.unsqueeze(0)
+        attention_mask[b, 0] = causal & same_segment & valid_query & valid_key
+
+    return attention_mask
+
+
+def _prepare_training_masks(examples: torch.Tensor, labels: torch.Tensor, args):
+    labels_for_loss = labels
+    attention_mask = None
+    eod_token_id = getattr(args, "eod_token_id", None)
+
+    if getattr(args, "eod_mask_loss", False):
+        if eod_token_id is None:
+            raise RuntimeError("eod_mask_loss enabled but eod_token_id is unavailable")
+        labels_for_loss = labels.clone()
+        labels_for_loss[labels_for_loss == eod_token_id] = 0
+
+    if getattr(args, "reset_attention_mask", False):
+        if eod_token_id is None:
+            raise RuntimeError("reset_attention_mask enabled but eod_token_id is unavailable")
+        attention_mask = _build_packed_reset_attention_mask(examples, eod_token_id=eod_token_id, pad_token_id=0)
+
+    return labels_for_loss, attention_mask
+
+
 def _parse_iter_from_ckpt_dir(name: str):
     match = re.search(r"iter(\d+)", name)
     if match:
@@ -239,8 +283,9 @@ def train_one_epoch(model: torch.nn.Module,
             "fp16": torch.cuda.amp.autocast(dtype=torch.float16),
             "tf32": contextlib.nullcontext(),
         }[args.precision]
+        labels_for_loss, attention_mask = _prepare_training_masks(examples, labels, args)
         with autocast_ctx:
-             c_loss, additional_loss_dict = model(examples, labels)
+             c_loss, additional_loss_dict = model(examples, labels_for_loss, attention_mask=attention_mask)
         loss = c_loss
         for (add_loss, weight) in additional_loss_dict.values():
             loss = loss + add_loss * weight
@@ -370,8 +415,9 @@ def val_one_epoch(model: torch.nn.Module,
             "fp16": torch.cuda.amp.autocast(dtype=torch.float16),
             "tf32": contextlib.nullcontext(),
         }[args.precision]
+        labels_for_loss, attention_mask = _prepare_training_masks(examples, labels, args)
         with autocast_ctx:
-             c_loss, additional_loss_dict = model(examples, labels)
+             c_loss, additional_loss_dict = model(examples, labels_for_loss, attention_mask=attention_mask)
         c_loss_value = c_loss.item()
 
         metric_logger.update(closs=c_loss_value)
@@ -398,8 +444,9 @@ def val_one_epoch_local(model: torch.nn.Module,
             "fp16": torch.cuda.amp.autocast(dtype=torch.float16),
             "tf32": contextlib.nullcontext(),
         }[args.precision]
+        labels_for_loss, attention_mask = _prepare_training_masks(examples, labels, args)
         with autocast_ctx:
-            c_loss, additional_loss_dict = model(examples, labels)
+            c_loss, additional_loss_dict = model(examples, labels_for_loss, attention_mask=attention_mask)
         c_loss_value = c_loss.item()
         metric_logger.update(closs=c_loss_value)
     # DO NOT synchronize between processes here
