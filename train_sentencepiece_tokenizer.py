@@ -1,5 +1,6 @@
 import argparse
 import tempfile
+import time
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
@@ -9,6 +10,11 @@ except ImportError as exc:
     raise ImportError(
         "sentencepiece is required. Install it with: pip install sentencepiece"
     ) from exc
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -127,9 +133,16 @@ def write_training_corpus(
     if not txt_files:
         raise ValueError(f"No .txt files found in directory: {input_dir}")
 
+    print(f"Found {len(txt_files)} txt files. Merging corpus...", flush=True)
+    file_iterable: Iterable[Path]
+    if tqdm is not None:
+        file_iterable = tqdm(txt_files, desc="Merging txt corpus", unit="file")
+    else:
+        file_iterable = txt_files
+
     line_count = 0
     with output_path.open("w", encoding="utf-8") as writer:
-        for txt_file in txt_files:
+        for txt_file in file_iterable:
             with txt_file.open("r", encoding="utf-8", errors="ignore") as reader:
                 for line in reader:
                     line = line.strip()
@@ -177,7 +190,11 @@ def main() -> None:
             train_kwargs["input_sentence_size"] = args.input_sentence_size
             train_kwargs["shuffle_input_sentence"] = True
 
+        print("Starting SentencePiece training...", flush=True)
+        start_time = time.perf_counter()
         spm.SentencePieceTrainer.train(**train_kwargs)
+        elapsed = time.perf_counter() - start_time
+        print(f"SentencePiece training completed in {elapsed:.2f} seconds.", flush=True)
     finally:
         temp_corpus_path.unlink(missing_ok=True)
 
